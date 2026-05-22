@@ -5382,7 +5382,10 @@ def run_bot(token: str) -> None:
 
                     if uid in USER_STATE:
                         _aw = USER_STATE[uid].get("awaiting") or ""
-                        if "gen_bank_type" in USER_STATE[uid] or "gen_transfer_type" in USER_STATE[uid] or _aw.startswith("ak_"):
+                        if _aw.startswith("new_gen_"):
+                            # Ждём нажатия кнопки — текстовые сообщения игнорируем
+                            pass
+                        elif "gen_bank_type" in USER_STATE[uid] or "gen_transfer_type" in USER_STATE[uid] or _aw.startswith("ak_"):
                             tg_request(token, "sendMessage", {"chat_id": msg["chat"]["id"], "text": "❌ Продолжайте ввод выше или нажмите кнопки."})
                         else:
                             tg_request(token, "sendMessage", {"chat_id": msg["chat"]["id"], "text": "❌ Сначала выберите банк (кнопками выше)."})
@@ -5669,17 +5672,17 @@ def run_bot(token: str) -> None:
                     if q["data"] in ("new_gen_save_pdf", "new_gen_onlypdf"):
                         state = USER_STATE.get(uid, {})
                         pdf_bytes = state.get("new_gen_pdf_bytes")
+                        if not pdf_bytes:
+                            # Двойной клик или сессия устарела — тихо игнорируем
+                            continue
                         filename = state.get("new_gen_pdf_filename", "receipt.pdf")
                         amount = (state.get("new_gen_values") or state.get("new_gen_saved_fields", {})).get("amount", "?")
                         mode = state.get("new_gen_mode", "")
                         label = _NEW_GEN_MODE_LABELS.get(mode, mode)
                         if uid in USER_STATE:
                             del USER_STATE[uid]
-                        if pdf_bytes:
-                            caption = f"✅ {label} | {amount} руб."
-                            tg_request(token, "sendDocument", {"chat_id": q["message"]["chat"]["id"], "caption": caption}, files={"document": (filename, pdf_bytes)})
-                        else:
-                            tg_request(token, "sendMessage", {"chat_id": q["message"]["chat"]["id"], "text": "❌ PDF не найден, попробуйте снова."})
+                        caption = f"✅ {label} | {amount} руб."
+                        tg_request(token, "sendDocument", {"chat_id": q["message"]["chat"]["id"], "caption": caption}, files={"document": (filename, pdf_bytes)})
                         _send_main_menu_button(token, q["message"]["chat"]["id"], tg_request)
                         continue
 
