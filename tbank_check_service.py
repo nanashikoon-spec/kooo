@@ -631,21 +631,29 @@ def _replace_all_fields_in_stream(
         is_f2 = field["font"] == "F2"
         font_type = "medium" if is_f2 else "regular"
         widths = f2_widths if is_f2 else f1_widths
-        renderable = f2_renderable if is_f2 else f1_renderable
 
         if is_f2:
             # Use hardcoded MEDIUM_WIDTHS for the encodability check (extracted /W
             # table from the PDF is often a small subset and gives false negatives).
             if not can_encode_in_font(new_val, "medium", MEDIUM_WIDTHS):
                 continue
+            # Skip glyph-outline check for F2 (Medium) — the embedded font subset
+            # only has glyphs from the donor's original amount (e.g. "250"), so a
+            # new amount with different digits (e.g. "13 000") would fail the check
+            # even though TinkoffSans Medium has all digits. We trust MEDIUM_UNI_TO_CID.
+        else:
+            # Skip field if any character lacks a glyph outline in the embedded font
+            if f1_renderable is not None:
+                missing_glyphs = [
+                    ch for ch in new_val if ch != " " and ord(ch) not in f1_renderable
+                ]
+                if missing_glyphs:
+                    continue
 
-        # Skip field if any character lacks a glyph outline in the embedded font
-        if renderable is not None:
-            missing_glyphs = [
-                ch for ch in new_val if ch != " " and ord(ch) not in renderable
-            ]
-            if missing_glyphs:
-                continue
+        # For F2 (Medium) fields always use MEDIUM_WIDTHS — the extracted /W table
+        # from the donor PDF is a small subset (only the donor's original amount digits)
+        # and produces wrong right-alignment for new amounts with different digits.
+        effective_widths = MEDIUM_WIDTHS if is_f2 else widths
 
         stream = _replace_field_bytes(
             stream,
@@ -654,7 +662,7 @@ def _replace_all_fields_in_stream(
             new_text=new_val,
             font_size=field["size"],
             right_aligned=(field.get("align", "right") == "right"),
-            widths=widths,
+            widths=effective_widths,
             font=font_type,
             tol_y=field.get("tol_y", 1.5),
             tol_x=field.get("tol_x", 8.0),
