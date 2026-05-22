@@ -3639,6 +3639,17 @@ _NEW_GEN_WIZARD_FIELDS: dict[str, list[tuple[str, str]]] = {
         ("gen_bank",         "🏦 Банк (например: Т-Банк, или - для авто)"),
         ("gen_operation_id", "🔑 ID операции (или - для авто)"),
     ],
+    "tbank_sbp": [
+        ("amount",           "💰 Сумма перевода (число, например: 5000)"),
+        ("sender_name",      "👤 Отправитель (например: Иван Иванович И.)"),
+        ("sender_account",   "💳 Последние 4 цифры счёта списания (например: 7645, или - для авто)"),
+        ("recipient_name",   "👤 Получатель (например: Анна Ивановна И.)"),
+        ("recipient_phone",  "📱 Телефон получателя (например: +7(900)000-00-00)"),
+        ("recipient_bank",   "🏦 Банк получателя (например: Сбербанк, ВТБ, Альфа)"),
+        ("operation_date",   "📅 Дата (ДД.ММ.ГГГГ, или - для авто)"),
+        ("operation_time",   "🕐 Время (ЧЧ:ММ:СС, или - для авто)"),
+        ("spb_number",       "🔑 SBP ID (из реального чека, или - для авто)"),
+    ],
 }
 
 _NEW_GEN_MODE_LABELS = {
@@ -3648,6 +3659,7 @@ _NEW_GEN_MODE_LABELS = {
     "gpb_sbp":        "Газпромбанк СБП",
     "vtb_sbp":        "ВТБ СБП",
     "vtb_vtb":        "ВТБ→ВТБ",
+    "tbank_sbp":      "Т-Банк СБП",
 }
 
 
@@ -3948,6 +3960,62 @@ def _gen_alfa_transgran(fields: dict) -> tuple[bytes, str]:
     return pdf_bytes, fname
 
 
+def _gen_tbank_sbp(fields: dict) -> tuple[bytes, str]:
+    """Сгенерировать чек Т-Банк СБП. Возвращает (pdf_bytes, filename).
+
+    Структура fields совпадает с формой `tbank_sbp` в _NEW_GEN_WIZARD_FIELDS.
+    Missing chars warning логируется, но не блокирует выдачу.
+    """
+    from gen_tbank_receipt import generate_tbank_receipt, get_missing_chars, _find_donor
+    try:
+        from tbank_enrich_donor import enrich_all, TBANK_DIR as _TBANK_DIR
+        if not list(_TBANK_DIR.glob("*_enriched.pdf")):
+            enrich_all(_TBANK_DIR)
+    except Exception:
+        pass
+
+    amount_raw = fields.get("amount", "1000")
+    amount_int = int(re.sub(r"\D", "", str(amount_raw)) or "1000")
+
+    raw_account = (fields.get("sender_account") or "").strip()
+    if raw_account in ("", "auto", "авто", "-", "—"):
+        sender_account = "408178100000****0000"
+    else:
+        digits = re.sub(r"\D", "", raw_account)
+        if len(digits) == 4:
+            sender_account = f"408178100000****{digits}"
+        elif len(digits) >= 4:
+            sender_account = digits[:20].ljust(20, "0")
+        else:
+            sender_account = "408178100000****0000"
+
+    donor = _find_donor(prefer_enriched=True)
+
+    text_fields = {
+        "sender_name": fields.get("sender_name") or "",
+        "recipient_name": fields.get("recipient_name") or "",
+        "recipient_bank": fields.get("recipient_bank") or "",
+    }
+    missing_ch = get_missing_chars(donor, text_fields)
+    if missing_ch:
+        print(f"[TBANK GEN] WARNING missing glyphs: {missing_ch}")
+
+    pdf_bytes, filename = generate_tbank_receipt(
+        amount=amount_int,
+        sender_name=fields.get("sender_name") or "Иван Иванович И.",
+        sender_account=sender_account,
+        recipient_name=fields.get("recipient_name") or "Анна Ивановна И.",
+        recipient_phone=fields.get("recipient_phone") or "+7(900)000-00-00",
+        recipient_bank=fields.get("recipient_bank") or "Сбербанк",
+        operation_date=fields.get("operation_date", "auto"),
+        operation_time=fields.get("operation_time", "auto"),
+        spb_number=fields.get("spb_number", "auto"),
+        receipt_number=fields.get("receipt_number", "auto"),
+        donor_path=donor,
+    )
+    return pdf_bytes, filename
+
+
 def _new_gen_send_next_field(token: str, chat_id: int, state: dict) -> None:
     """Отправить следующий вопрос wizard нового генератора."""
     mode = state["new_gen_mode"]
@@ -4046,6 +4114,29 @@ def _run_new_gen(token: str, uid: int, chat_id: int, state: dict, tg_req) -> Non
             caption = f"✅ Газпромбанк СБП | {fields.get('amount', '?')} руб."
             tg_req(token, "sendDocument", {"chat_id": chat_id, "caption": caption}, files={"document": (filename, pdf_bytes)})
             _send_main_menu_button(token, chat_id, tg_req)
+            return
+
+        if mode == "tbank_sbp":
+            pdf_bytes, filename = _gen_tbank_sbp(fields)
+            # Сохраняем PDF и показываем те же три кнопки что у Альфы
+            USER_STATE[uid] = {
+                "awaiting": "new_gen_pending",
+                "new_gen_mode": mode,
+                "new_gen_values": fields,
+                "new_gen_saved_fields": fields,
+                "new_gen_saved_mode": mode,
+                "new_gen_pdf_bytes": pdf_bytes,
+                "new_gen_pdf_filename": filename,
+            }
+            tg_req(token, "sendMessage", {
+                "chat_id": chat_id,
+                "text": f"✅ Чек {label} готов!\n\nВыберите действие:",
+                "reply_markup": json.dumps({"inline_keyboard": [
+                    [{"text": "📎 Прислать чек для нового SBP ID", "callback_data": "new_gen_sbp_extract"}],
+                    [{"text": "💾 Сохранить PDF", "callback_data": "new_gen_save_pdf"}],
+                    [{"text": "❌ Отмена", "callback_data": "main_back"}],
+                ]}),
+            })
             return
 
         # Для Альфа: сначала проверяем SBP ID из формы, затем пул
@@ -4954,7 +5045,13 @@ def run_bot(token: str) -> None:
                             saved_mode = state.get("new_gen_saved_mode") or state.get("new_gen_mode", "alfa_sbp")
                             label = _NEW_GEN_MODE_LABELS.get(saved_mode, saved_mode)
                             try:
-                                pdf_bytes, filename = _gen_alfa_sbp(saved_fields, sbp_id_override=sbp_id)
+                                if saved_mode == "tbank_sbp":
+                                    # Для T-Bank подставляем SBP ID в поле spb_number и регенерируем
+                                    saved_fields = dict(saved_fields)
+                                    saved_fields["spb_number"] = sbp_id
+                                    pdf_bytes, filename = _gen_tbank_sbp(saved_fields)
+                                else:
+                                    pdf_bytes, filename = _gen_alfa_sbp(saved_fields, sbp_id_override=sbp_id)
                                 del USER_STATE[uid]
                                 caption = f"✅ {label} | {saved_fields.get('amount', '?')} руб. | SBP ID вставлен"
                                 tg_request(token, "sendDocument", {"chat_id": msg["chat"]["id"], "caption": caption}, files={"document": (filename, pdf_bytes)})
@@ -5516,13 +5613,15 @@ def run_bot(token: str) -> None:
                         continue
 
                     if q["data"] == "gen_type_tbank":
+                        if uid in USER_STATE:
+                            del USER_STATE[uid]
                         tg_request(token, "editMessageText", {
                             "chat_id": q["message"]["chat"]["id"],
                             "message_id": q["message"]["message_id"],
                             "text": "🅃 Т-Банк — выберите тип:",
                             "reply_markup": json.dumps({
                                 "inline_keyboard": [
-                                    [{"text": "📱 СБП", "callback_data": "gen_tbank_sbp"}],
+                                    [{"text": "📱 СБП", "callback_data": "new_gen_start_tbank_sbp"}],
                                     [{"text": "💳 По карте", "callback_data": "gen_tbank_card"}],
                                     [{"text": "🌍 Трансгран", "callback_data": "gen_tbank_transgran"}],
                                     [{"text": "⬅️ Назад", "callback_data": "main_generate"}],
@@ -5531,7 +5630,20 @@ def run_bot(token: str) -> None:
                         })
                         continue
 
-                    if q["data"] in ("gen_tbank_sbp", "gen_tbank_card", "gen_tbank_transgran"):
+                    if q["data"] == "gen_tbank_sbp":
+                        # Legacy callback → redirect на новый flow с формой как у Альфы
+                        cur = USER_STATE.get(uid, {})
+                        if cur.get("awaiting") == "new_gen_form" and cur.get("new_gen_mode") == "tbank_sbp":
+                            continue
+                        USER_STATE[uid] = {
+                            "awaiting": "new_gen_form",
+                            "new_gen_mode": "tbank_sbp",
+                            "new_gen_values": {},
+                        }
+                        _new_gen_send_form(token, q["message"]["chat"]["id"], USER_STATE[uid], tg_request)
+                        continue
+
+                    if q["data"] in ("gen_tbank_card", "gen_tbank_transgran"):
                         rtype = q["data"].replace("gen_tbank_", "")
                         from tbank_scratch_service import get_fields_for_scratch
                         scratch_fields = get_fields_for_scratch(rtype)
@@ -5676,7 +5788,8 @@ def run_bot(token: str) -> None:
                         continue
 
                     if q["data"] in ("new_gen_start_alfa_sbp", "new_gen_start_alfa_card",
-                                     "new_gen_start_alfa_transgran", "new_gen_start_gpb_sbp"):
+                                     "new_gen_start_alfa_transgran", "new_gen_start_gpb_sbp",
+                                     "new_gen_start_tbank_sbp"):
                         mode = q["data"].replace("new_gen_start_", "")
                         cur = USER_STATE.get(uid, {})
                         # Двойной клик: форма уже отправлена для этого же режима — игнорируем
