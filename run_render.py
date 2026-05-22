@@ -108,6 +108,29 @@ def _http_server_thread() -> None:
         print(f"[render] HTTP server error: {e}", flush=True)
 
 
+def _self_ping_thread() -> None:
+    """Ping own health endpoint every 5 min to prevent Render free-tier spin-down."""
+    import urllib.request
+
+    # Render exposes the external URL via env var; fall back to localhost
+    base_url = (
+        os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+        or f"http://localhost:{PORT}"
+    )
+    ping_url = f"{base_url}/healthz"
+    print(f"[render] Self-ping enabled → {ping_url} every 5 min", flush=True)
+
+    # Wait for bot to fully start before first ping
+    time.sleep(30)
+    while True:
+        try:
+            with urllib.request.urlopen(ping_url, timeout=10) as resp:
+                _ = resp.read()
+        except Exception as exc:
+            print(f"[render] Self-ping failed: {exc}", flush=True)
+        time.sleep(300)  # 5 minutes
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -117,6 +140,10 @@ def main() -> None:
     # Стартуем HTTP-сервер в фоне (для Render health check)
     t = threading.Thread(target=_http_server_thread, daemon=True, name="http-health")
     t.start()
+
+    # Self-ping каждые 5 мин чтобы Render не засыпал (free tier)
+    sp = threading.Thread(target=_self_ping_thread, daemon=True, name="self-ping")
+    sp.start()
 
     # Импортируем бот — если упадёт здесь, Render увидит exit(1) и перезапустит
     try:
