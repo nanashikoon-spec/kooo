@@ -749,21 +749,46 @@ def generate_sbp_receipt(
     else:
         new_operation_id = receipt_number
 
-    # SBP ID prefix (A or B), p23 (2-digit era counter), and check character
-    # (pos 16).  When called from generate_random_sbp these are pre-selected
-    # from the donor's CMap so no new characters are introduced.  For
-    # user-specified calls we fall back to random generation — font surgery
-    # will handle any missing chars.
     _sbp_prefix = sbp_prefix or random.choice("AB")
     _sbp_p23 = sbp_p23  # may be None; _generate_sbp_id will extract from donor
+
+    # --- Collect text WITHOUT sbp_check for initial donor search ---
+    # We pick sbp_check AFTER loading the donor CMap so we can choose a char
+    # that is already in the font — this avoids font surgery for just one char.
+    _text_without_check = "".join(filter(None, [
+        new_amount, new_commission, new_date_time, new_date_formed,
+        new_operation_id,
+        new_recipient, new_phone, new_bank, new_message,
+        account or "",
+        sbp_id_override or _sbp_prefix,
+    ]))
+
+    # --- Find / load donor ---
+    if donor_path is not None:
+        donor_file = Path(donor_path)
+    else:
+        donor_file, _missing_n = _find_best_donor(_text_without_check)
+        if donor_file is None:
+            raise FileNotFoundError(
+                f"No SBP donor PDFs found in {SBP_DONORS_DIR}. "
+                "Add real Alfa-Bank SBP receipts to that folder."
+            )
+
+    # --- Pick sbp_check from donor CMap to avoid introducing new characters ---
+    _donor_cmap_for_check = _cmap_from_pdf(donor_file.read_bytes())
+    _avail_cps_for_check = set(_donor_cmap_for_check.keys())
     if sbp_check is not None:
         _sbp_check = sbp_check
-    elif random.random() < 0.6:
-        _sbp_check = random.choice(string.ascii_uppercase)
     else:
-        _sbp_check = str(random.randint(0, 9))
+        # Prefer chars already in the donor CMap: uppercase letters then digits
+        _check_pool = [
+            c for c in string.ascii_uppercase if ord(c) in _avail_cps_for_check
+        ] or [
+            c for c in string.digits if ord(c) in _avail_cps_for_check
+        ] or list(string.ascii_uppercase)  # last resort — may need font surgery
+        _sbp_check = random.choice(_check_pool)
 
-    # --- Collect text for font coverage check ---
+    # Final coverage text including the chosen sbp_check
     all_new_text_base = "".join(filter(None, [
         new_amount, new_commission, new_date_time, new_date_formed,
         new_operation_id,
@@ -771,17 +796,6 @@ def generate_sbp_receipt(
         account or "",
         sbp_id_override if sbp_id_override else (_sbp_prefix + _sbp_check),
     ]))
-
-    # --- Find / load donor ---
-    if donor_path is not None:
-        donor_file = Path(donor_path)
-    else:
-        donor_file, _missing_n = _find_best_donor(all_new_text_base)
-        if donor_file is None:
-            raise FileNotFoundError(
-                f"No SBP donor PDFs found in {SBP_DONORS_DIR}. "
-                "Add real Alfa-Bank SBP receipts to that folder."
-            )
 
     pdf_bytes = donor_file.read_bytes()
     print(f"[INFO] Donor: {donor_file.name}")
