@@ -289,6 +289,132 @@ def _generate_sbp_id(
 # CMap / donor helpers (shared logic with gen_tajik_receipt.py)
 # ---------------------------------------------------------------------------
 
+def _trim_cmap_in_pdf(pdf_bytes: bytes) -> bytes:
+    """Remove CMap entries for CIDs that are never used in the content stream.
+
+    Genuine Oracle BI Publisher PDFs have a tight CMap with zero unused entries.
+    After font surgery the CMap may contain extra glyphs. This function strips
+    them so the output is indistinguishable from a genuine receipt.
+    """
+    STREAM_RE = re.compile(
+        rb"<<(.*?)/Length\s+(\d+)(.*?)>>\s*stream\r?\n", re.DOTALL
+    )
+    streams = []
+    for m in STREAM_RE.finditer(pdf_bytes):
+        slen = int(m.group(2))
+        start = m.end()
+        raw = pdf_bytes[start: start + slen]
+        try:
+            dec = zlib.decompress(raw)
+        except zlib.error:
+            dec = None
+        streams.append({
+            "dict_start": m.start(),
+            "stream_start": start,
+            "stream_len": slen,
+            "len_num_start": m.start(2),
+            "raw": raw,
+            "dec": dec,
+        })
+
+    if len(streams) < 6:
+        return pdf_bytes  # unexpected structure
+
+    # --- Collect used CIDs from content stream (index 3) ---
+    content = streams[3]["dec"]
+    if not content:
+        return pdf_bytes
+    used_cids: set[int] = set()
+    for tj_hex in re.findall(rb"<([0-9A-Fa-f]+)>\s*Tj", content):
+        s = tj_hex.decode()
+        for i in range(0, len(s), 4):
+            used_cids.add(int(s[i: i + 4], 16))
+
+    # --- Parse CMap stream (index 5) ---
+    cmap_info = streams[5]
+    cmap_dec = cmap_info["dec"]
+    if not cmap_dec:
+        return pdf_bytes
+    cmap_text = cmap_dec.decode("latin-1")
+
+    block_m = re.search(r"beginbfchar\r?\n(.*?)endbfchar", cmap_text, re.DOTALL)
+    if not block_m:
+        return pdf_bytes
+    entries = re.findall(r"<([0-9A-Fa-f]{4})>\s+<([0-9A-Fa-f]{4})>", block_m.group(1))
+
+    # Only keep entries whose CID is actually used
+    kept = [(c, u) for c, u in entries if int(c, 16) in used_cids]
+    if len(kept) == len(entries):
+        return pdf_bytes  # nothing to trim
+
+    # --- Rebuild CMap text ---
+    new_block_body = "\r\n".join(f"<{c}> <{u}>" for c, u in kept) + "\r\n"
+    new_cmap_text = cmap_text
+    # Replace entry count
+    new_cmap_text = re.sub(
+        r"\d+(?=\s+beginbfchar)", str(len(kept)), new_cmap_text, count=1
+    )
+    # Replace block body
+    new_cmap_text = new_cmap_text.replace(block_m.group(1), new_block_body, 1)
+    new_cmap_bytes = new_cmap_text.encode("latin-1")
+    new_raw = zlib.compress(new_cmap_bytes, 6)
+
+    print(f"[TRIM CMAP] {len(entries)} → {len(kept)} entries "
+          f"({len(cmap_info['raw'])} → {len(new_raw)} bytes)")
+
+    # --- Splice new stream into PDF bytes ---
+    delta = len(new_raw) - cmap_info["stream_len"]
+    data = bytearray(pdf_bytes)
+
+    # Replace stream data
+    s_start = cmap_info["stream_start"]
+    data[s_start: s_start + cmap_info["stream_len"]] = new_raw
+
+    # Update /Length value
+    old_len_str = str(cmap_info["stream_len"]).encode()
+    new_len_str = str(len(new_raw)).encode()
+    ln_start = cmap_info["len_num_start"]
+    # Recompute after splice (positions shift if len string changes length)
+    # Find fresh after splice (delta not yet applied to data, so use bytearray as-is)
+    len_delta = len(new_len_str) - len(old_len_str)
+    data[ln_start: ln_start + len(old_len_str)] = new_len_str
+    delta += len_delta
+
+    if delta == 0:
+        return bytes(data)
+
+    # Adjust for len_delta in positions
+    effective_stream_start = s_start  # before splice; xref entries after this shift
+
+    # Update xref table
+    xref_m = re.search(
+        rb"xref\r?\n(\d+)\s+(\d+)\r?\n((?:\d{10}\s+\d{5}\s+[nf]\s*\r?\n)+)",
+        bytes(data),
+    )
+    if xref_m:
+        entries_ba = bytearray(xref_m.group(3))
+        for em in re.finditer(rb"(\d{10})(\s+\d{5}\s+[nf]\s*\r?\n)", entries_ba):
+            offset = int(em.group(1))
+            if offset > effective_stream_start:
+                new_offset = offset + delta
+                entries_ba[em.start(1): em.start(1) + 10] = f"{new_offset:010d}".encode()
+        pos = xref_m.start(3)
+        data[pos: pos + len(xref_m.group(3))] = bytes(entries_ba)
+
+    # Update startxref
+    sxref_m = re.search(rb"startxref\r?\n(\d+)\r?\n", bytes(data))
+    if sxref_m:
+        old_xref_pos = int(sxref_m.group(1))
+        if effective_stream_start < old_xref_pos:
+            new_xref_pos = old_xref_pos + delta
+            pos = sxref_m.start(1)
+            data[pos: pos + len(str(old_xref_pos))] = str(new_xref_pos).encode()
+
+    return bytes(data)
+
+
+# ---------------------------------------------------------------------------
+
 def _cmap_from_pdf(pdf_bytes: bytes) -> dict[int, str]:
     for m in re.finditer(rb"<<(.*?)/Length\s+(\d+)(.*?)>>\s*stream\r?\n", pdf_bytes, re.DOTALL):
         raw = pdf_bytes[m.end(): m.end() + int(m.group(2))]
@@ -937,6 +1063,9 @@ def generate_sbp_receipt(
 
     # --- Set Document /ID ---
     pdf_bytes = _set_doc_id_equal(pdf_bytes)
+
+    # --- Trim CMap: remove unused entries so checker sees zero unused ---
+    pdf_bytes = _trim_cmap_in_pdf(pdf_bytes)
 
     # --- Post-generation validation ---
     from pdf_validate import validate_pdf
