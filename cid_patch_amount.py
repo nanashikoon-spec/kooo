@@ -153,7 +153,8 @@ def patch_replacements(
                 display = parent or target_old
                 if display not in logged_parents:
                     logged_parents.add(display)
-                    print(f"[OK] {display[:50].replace(chr(10), '\\\\n')} (anchored) -> {target_new[:50]}")
+                    _disp = display[:50].replace("\n", "\\n")
+                    print(f"[OK] {_disp} (anchored) -> {target_new[:50]}")
 
         if new_dec != dec:
             new_raw = zlib.compress(new_dec, 6)
