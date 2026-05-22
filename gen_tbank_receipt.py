@@ -108,6 +108,7 @@ def generate_tbank_receipt(
         detect_receipt_type,
         _update_doc_id,
         _update_dates,
+        _update_keywords,
     )
 
     if donor_path is None:
@@ -149,6 +150,7 @@ def generate_tbank_receipt(
     except ValueError:
         dt = datetime.now()
     pdf_bytes = _update_dates(pdf_bytes, dt)
+    pdf_bytes = _update_keywords(pdf_bytes, dt)
     pdf_bytes = _update_doc_id(pdf_bytes)
 
     # Build filename

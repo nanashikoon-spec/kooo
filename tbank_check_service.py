@@ -249,33 +249,58 @@ def _recompress_zero_delta(
 ) -> bytes:
     """Recompress content stream keeping EXACTLY the same compressed size.
 
-    Tries multiple zlib levels/strategies and optional newline padding to
-    match the original compressed size. This preserves /Length, xref, and
-    startxref — nothing shifts, so the PDF passes integrity checks.
+    Tries multiple zlib levels/strategies and minimal padding to match the
+    original compressed size. This preserves /Length, xref, and startxref —
+    nothing shifts, so the PDF passes integrity checks.
+
+    Genuine T-Bank receipts have only 1-2 trailing newlines. We strip any
+    existing trailing whitespace and try MANY zlib variants before resorting
+    to large padding, so the output looks indistinguishable from genuine.
     """
     target = old_stream_len
 
+    # Strip existing trailing whitespace — we'll add minimal padding ourselves
+    new_decompressed = new_decompressed.rstrip(b"\n\r \t") + b"\n"
+
+    _STRATEGIES = (
+        zlib.Z_DEFAULT_STRATEGY,
+        zlib.Z_FILTERED,
+        zlib.Z_HUFFMAN_ONLY,
+        zlib.Z_RLE,
+        zlib.Z_FIXED,
+    )
+
     def _try_compress(data: bytes) -> bytes | None:
         for level in (6, 7, 8, 9, 5, 4, 3, 2, 1):
-            c = zlib.compress(data, level)
-            if len(c) == target:
-                return c
-            for mem in (4, 5, 6, 7, 8, 9):
-                co = zlib.compressobj(level, zlib.DEFLATED, 15, mem, 0)
-                c2 = co.compress(data) + co.flush()
-                if len(c2) == target:
-                    return c2
+            for strategy in _STRATEGIES:
+                for mem in (8, 9, 7, 6, 5, 4):
+                    co = zlib.compressobj(level, zlib.DEFLATED, 15, mem, strategy)
+                    c = co.compress(data) + co.flush()
+                    if len(c) == target:
+                        return c
         return None
 
-    # First try without padding
+    # First try without extra padding (only the single \n we added above)
     exact = _try_compress(new_decompressed)
     if exact:
         data = bytearray(pdf_bytes)
         data[stream_start : stream_start + old_stream_len] = exact
         return bytes(data)
 
-    # Try with newline padding (up to 1200 newlines to handle heavily modified streams)
-    for pad in range(1, 1200):
+    # Try with small whitespace padding (prefer spaces over \n — less detectable)
+    # Order: 1-10 spaces, then mixed, then up to 50 chars total — stay realistic
+    pad_chars = [b" ", b"\n", b"\t"]
+    for pad_n in range(1, 50):
+        for pc in pad_chars:
+            candidate = new_decompressed + pc * pad_n
+            exact = _try_compress(candidate)
+            if exact:
+                data = bytearray(pdf_bytes)
+                data[stream_start : stream_start + old_stream_len] = exact
+                return bytes(data)
+
+    # Last resort: large \n padding (up to 1200) — may be flagged by strict checkers
+    for pad in range(50, 1200):
         candidate = new_decompressed + b"\n" * pad
         exact = _try_compress(candidate)
         if exact:
