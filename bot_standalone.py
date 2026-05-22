@@ -5672,6 +5672,10 @@ def run_bot(token: str) -> None:
                     if q["data"] in ("new_gen_start_alfa_sbp", "new_gen_start_alfa_card",
                                      "new_gen_start_alfa_transgran", "new_gen_start_gpb_sbp"):
                         mode = q["data"].replace("new_gen_start_", "")
+                        cur = USER_STATE.get(uid, {})
+                        # Двойной клик: форма уже отправлена для этого же режима — игнорируем
+                        if cur.get("awaiting") == "new_gen_form" and cur.get("new_gen_mode") == mode:
+                            continue
                         USER_STATE[uid] = {
                             "awaiting": "new_gen_form",
                             "new_gen_mode": mode,
@@ -5904,6 +5908,9 @@ def run_bot(token: str) -> None:
                         raw_subtype = prev.get("gen_vtb_subtype", "vtb_sbp")
                         # Нормализуем: "vtb_vtb_vtb" → "vtb_vtb"
                         mode = "vtb_vtb" if "vtb_vtb" in raw_subtype else "vtb_sbp"
+                        # Двойной клик: форма уже отправлена для этого режима — игнорируем
+                        if prev.get("awaiting") == "new_gen_form" and prev.get("new_gen_mode") == mode:
+                            continue
                         USER_STATE[uid] = {
                             "awaiting": "new_gen_form",
                             "new_gen_mode": mode,
