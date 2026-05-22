@@ -3966,7 +3966,7 @@ def _gen_tbank_sbp(fields: dict) -> tuple[bytes, str]:
     Структура fields совпадает с формой `tbank_sbp` в _NEW_GEN_WIZARD_FIELDS.
     Missing chars warning логируется, но не блокирует выдачу.
     """
-    from gen_tbank_receipt import generate_tbank_receipt, get_missing_chars, _find_donor
+    from gen_tbank_receipt import generate_tbank_receipt
     try:
         from tbank_enrich_donor import enrich_all, TBANK_DIR as _TBANK_DIR
         if not list(_TBANK_DIR.glob("*_enriched.pdf")):
@@ -3989,17 +3989,6 @@ def _gen_tbank_sbp(fields: dict) -> tuple[bytes, str]:
         else:
             sender_account = "408178100000****0000"
 
-    donor = _find_donor(prefer_enriched=True)
-
-    text_fields = {
-        "sender_name": fields.get("sender_name") or "",
-        "recipient_name": fields.get("recipient_name") or "",
-        "recipient_bank": fields.get("recipient_bank") or "",
-    }
-    missing_ch = get_missing_chars(donor, text_fields)
-    if missing_ch:
-        print(f"[TBANK GEN] WARNING missing glyphs: {missing_ch}")
-
     pdf_bytes, filename = generate_tbank_receipt(
         amount=amount_int,
         sender_name=fields.get("sender_name") or "Иван Иванович И.",
@@ -4011,7 +4000,7 @@ def _gen_tbank_sbp(fields: dict) -> tuple[bytes, str]:
         operation_time=fields.get("operation_time", "auto"),
         spb_number=fields.get("spb_number", "auto"),
         receipt_number=fields.get("receipt_number", "auto"),
-        donor_path=donor,
+        # donor_path=None → generate_tbank_receipt выберет подходящий донор сам
     )
     return pdf_bytes, filename
 
@@ -5316,6 +5305,9 @@ def run_bot(token: str) -> None:
                     # Новые генераторы: форма (все поля сразу)
                     if uid in USER_STATE and USER_STATE[uid].get("awaiting") == "new_gen_form":
                         state = USER_STATE[uid]
+                        # Защита от двойного запуска: пока идёт генерация — игнорируем
+                        if state.get("new_gen_generating"):
+                            continue
                         mode = state["new_gen_mode"]
                         fields_list = _NEW_GEN_WIZARD_FIELDS.get(mode, [])
                         parsed = _parse_gen_form(text, fields_list)
@@ -5331,6 +5323,7 @@ def run_bot(token: str) -> None:
                             _new_gen_send_form(token, chat_id, state, tg_request)
                         else:
                             state["new_gen_values"] = parsed
+                            state["new_gen_generating"] = True
                             _run_new_gen(token, uid, chat_id, state, tg_request)
                         continue
 
