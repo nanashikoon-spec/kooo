@@ -19,20 +19,100 @@ from typing import Optional
 BASE_DIR = Path(__file__).parent
 TBANK_DIR = BASE_DIR / "TBANK"
 
+# Cache: pdf_path -> set of renderable unicode codepoints in F1 (regular) font.
+_RENDERABLE_CACHE: dict[Path, set[int] | None] = {}
 
-def _find_donor(prefer_enriched: bool = True) -> Path:
-    """Pick an SBP donor from TBANK/ folder, preferring enriched variants."""
-    if prefer_enriched:
-        enriched = sorted(TBANK_DIR.glob("*_enriched.pdf"))
-        if enriched:
-            return random.choice(enriched)
-    candidates = [p for p in sorted(TBANK_DIR.glob("*.pdf")) if "_enriched" not in p.stem]
-    if not candidates:
+
+def _renderable_chars_for(donor_path: Path) -> set[int] | None:
+    """Get renderable F1 codepoints for a donor (cached)."""
+    cached = _RENDERABLE_CACHE.get(donor_path)
+    if cached is not None or donor_path in _RENDERABLE_CACHE:
+        return cached
+    try:
+        from tbank_check_service import get_renderable_chars
+        chars = get_renderable_chars(donor_path.read_bytes(), "regular")
+    except Exception:
+        chars = None
+    _RENDERABLE_CACHE[donor_path] = chars
+    return chars
+
+
+def _all_donors() -> list[Path]:
+    """All available T-Bank donor PDFs (fresh ones first, enriched last)."""
+    fresh = sorted(TBANK_DIR.glob("tbank_sbp_*.pdf"))
+    enriched = sorted(TBANK_DIR.glob("*_enriched.pdf"))
+    legacy = [p for p in sorted(TBANK_DIR.glob("*.pdf"))
+              if not p.name.startswith("tbank_sbp_") and "_enriched" not in p.stem]
+    return fresh + enriched + legacy
+
+
+def _find_donor(
+    prefer_enriched: bool = False,
+    text_fields: Optional[dict[str, str]] = None,
+) -> Path:
+    """Pick an SBP donor from TBANK/.
+
+    If text_fields is provided, only donors whose F1 font can render ALL
+    characters are eligible. Among eligible donors, fresh (tbank_sbp_*) are
+    preferred over enriched legacy ones — fresh donors have current metadata
+    and pass strict external verification more reliably.
+    """
+    all_donors = _all_donors()
+    if not all_donors:
         raise FileNotFoundError(
             "Не найдены донорские PDF для Т-Банка. "
             "Положите файлы в папку TBANK/ проекта."
         )
-    return random.choice(candidates)
+
+    needed: set[int] = set()
+    if text_fields:
+        for val in text_fields.values():
+            for ch in str(val):
+                if ch != " ":
+                    needed.add(ord(ch))
+
+    if not needed:
+        fresh = [p for p in all_donors if p.name.startswith("tbank_sbp_")]
+        if fresh and not prefer_enriched:
+            return random.choice(fresh)
+        if prefer_enriched:
+            enr = [p for p in all_donors if "_enriched" in p.stem]
+            if enr:
+                return random.choice(enr)
+        return random.choice(all_donors)
+
+    eligible_fresh: list[Path] = []
+    eligible_enriched: list[Path] = []
+    eligible_legacy: list[Path] = []
+    best_partial: tuple[int, Path] | None = None
+
+    for d in all_donors:
+        chars = _renderable_chars_for(d)
+        if chars is None:
+            covered = needed
+        else:
+            covered = needed & chars
+            if covered != needed:
+                missing_count = len(needed - chars)
+                if best_partial is None or missing_count < best_partial[0]:
+                    best_partial = (missing_count, d)
+                continue
+        if d.name.startswith("tbank_sbp_"):
+            eligible_fresh.append(d)
+        elif "_enriched" in d.stem:
+            eligible_enriched.append(d)
+        else:
+            eligible_legacy.append(d)
+
+    if eligible_fresh:
+        return random.choice(eligible_fresh)
+    if eligible_enriched:
+        return random.choice(eligible_enriched)
+    if eligible_legacy:
+        return random.choice(eligible_legacy)
+    if best_partial is not None:
+        return best_partial[1]
+    return random.choice(all_donors)
 
 
 def _format_amount(amount: int) -> str:
@@ -111,9 +191,6 @@ def generate_tbank_receipt(
         _update_keywords,
     )
 
-    if donor_path is None:
-        donor_path = _find_donor(prefer_enriched=True)
-
     operation_date, operation_time = _auto_datetime(operation_date, operation_time)
 
     if spb_number in ("", "auto", "авто"):
@@ -139,6 +216,9 @@ def generate_tbank_receipt(
         "bank": recipient_bank,
         "account": sender_account,
     }
+
+    if donor_path is None:
+        donor_path = _find_donor(text_fields=changes)
 
     receipt_type = detect_receipt_type(donor_path)
 
