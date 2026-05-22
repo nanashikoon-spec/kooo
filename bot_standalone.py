@@ -3853,6 +3853,11 @@ def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[byt
 
     receipt_number = _next_alfa_op_id(op_date, op_time)
 
+    # Locate Tahoma font for font surgery (adds missing Cyrillic glyphs if needed)
+    _bot_dir = Path(__file__).parent
+    _tahoma = _bot_dir / "fonts" / "tahoma.ttf"
+    _glyph_src = str(_tahoma) if _tahoma.exists() else None
+
     result = generate_sbp_receipt(
         amount=amount,
         recipient=fields.get("recipient_name") or "Виктория Игоревна С",
@@ -3864,6 +3869,7 @@ def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[byt
         message=fields.get("message") or "Перевод денежных средств",
         receipt_number=receipt_number,
         sbp_id_override=sbp_id_override,
+        glyph_source=_glyph_src,
     )
     pdf_bytes, filename = result[0], result[1]
 

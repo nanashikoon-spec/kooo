@@ -1,4 +1,4 @@
 python-telegram-bot>=21.0,<22.0
 python-dotenv>=1.0.0
 PyMuPDF>=1.23.0
-fonttools>=4.0.0
+fonttools>=4.43.0

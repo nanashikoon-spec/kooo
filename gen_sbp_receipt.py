@@ -790,15 +790,41 @@ def generate_sbp_receipt(
     cmap = _cmap_from_pdf(pdf_bytes)
     missing = _chars_missing(cmap, all_new_text_base)
     if missing:
-        print(f"[INFO] Missing chars: {sorted(missing)} — running font surgery...")
-        from font_extend import extend_font_in_pdf
-        pdf_bytes, cmap = extend_font_in_pdf(
-            pdf_bytes, all_new_text_base, glyph_source=glyph_source
-        )
-        still_missing = _chars_missing(cmap, all_new_text_base)
-        if still_missing:
-            raise RuntimeError(f"Font surgery failed — still missing: {sorted(still_missing)}")
-        print("[INFO] Font surgery complete.")
+        # Check if fonttools is available before attempting surgery
+        _fonttools_ok = False
+        try:
+            import importlib
+            importlib.import_module("fontTools.ttLib")
+            _fonttools_ok = True
+        except ImportError:
+            pass
+
+        if _fonttools_ok:
+            print(f"[INFO] Missing chars: {sorted(missing)} — running font surgery...")
+            from font_extend import extend_font_in_pdf
+            pdf_bytes, cmap = extend_font_in_pdf(
+                pdf_bytes, all_new_text_base, glyph_source=glyph_source
+            )
+            still_missing = _chars_missing(cmap, all_new_text_base)
+            if still_missing:
+                raise RuntimeError(f"Font surgery failed — still missing: {sorted(still_missing)}")
+            print("[INFO] Font surgery complete.")
+        else:
+            # fonttools not installed — try to find a zero-missing donor instead
+            print(f"[WARN] fonttools not available, searching for zero-missing donor "
+                  f"(missing from current: {sorted(missing)})")
+            perfect_donor, perfect_missing = _find_best_donor(all_new_text_base)
+            if perfect_donor is not None and perfect_missing == 0:
+                donor_file = perfect_donor
+                pdf_bytes = donor_file.read_bytes()
+                cmap = _cmap_from_pdf(pdf_bytes)
+                print(f"[INFO] Switched to zero-missing donor: {donor_file.name}")
+            else:
+                missing_chars = sorted(missing)
+                raise RuntimeError(
+                    f"Символы {missing_chars} отсутствуют во всех донорских PDF. "
+                    "Попробуйте другое имя получателя или банк."
+                )
     else:
         print("[INFO] All characters already in font.")
 
