@@ -1,0 +1,14 @@
+{
+  "category": "sbp",
+  "output": "чеки 07.03/receipt_sbp_2505.pdf",
+  "amount": "2 505 RUR",
+  "commission": "0 RUR",
+  "recipient": "Мавлетов Тимур В.",
+  "phone": "+7 (917) 495-38-70",
+  "bank": "Т-Банк",
+  "account": "40817810980481250507",
+  "operation_id": "C160703261011438",
+  "message": "Перевод денежных средств",
+  "date_time": "07.03.2026 13:25:45 мск",
+  "date_formed": "07.03.2026 13:25 мск"
+}

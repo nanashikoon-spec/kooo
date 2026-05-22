@@ -1,0 +1,19 @@
+{
+  "days": {
+    "2026-04-16": {
+      "7076663447": {
+        "receipts": {
+          "alfa": 1,
+          "vtb": 0,
+          "tbank": 0,
+          "auto": 0
+        },
+        "statements": {
+          "alfa": 0,
+          "vtb": 0,
+          "tbank": 0
+        }
+      }
+    }
+  }
+}

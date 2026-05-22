@@ -1,0 +1,13 @@
+{
+  "category": "tadzhikistan",
+  "output": "receipt.pdf",
+  "amount": "10 000 RUR",
+  "commission": "0 RUR",
+  "amount_credited": "600 TJS",
+  "recipient": "Руден Н.",
+  "phone": "+992901244633",
+  "account": "40817810980480002476",
+  "operation_id": "C82050326098477",
+  "date_time": "06.03.2026 12:34:16",
+  "date_formed": "06.03.2026 12:38 мск"
+}

@@ -1,0 +1,41 @@
+/CIDInit /ProcSet findresource begin
+12 dict begin begincmap /CIDSystemInfo
+<< /Registry (Oracle) /Ordering(UCS) /Supplement 0 >> def
+/CMapName /Oracle-Identity-UCS def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+29 beginbfchar
+<0000> <003F>
+<0001> <0028>
+<0002> <043F>
+<0003> <043E>
+<0004> <0434>
+<0005> <0438>
+<0006> <0441>
+<0007> <044C>
+<0008> <0020>
+<0009> <0442>
+<000A> <0440>
+<000B> <0443>
+<000C> <043D>
+<000D> <043A>
+<000E> <0430>
+<000F> <0410>
+<0010> <041E>
+<0011> <00AB>
+<0012> <041B>
+<0013> <042C>
+<0014> <0424>
+<0015> <002D>
+<0016> <0411>
+<0017> <041D>
+<0018> <041A>
+<0019> <00BB>
+<001A> <0029>
+<001B> <002E>
+<001C> <0418>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end end

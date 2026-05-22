@@ -1,0 +1,139 @@
+Команды (Windows / PowerShell) — адаптация из replacements_command_template.txt
+
+==================================================
+0) Установка зависимостей (один раз)
+==================================================
+1) Установите Python 3 с сайта:
+   https://www.python.org/downloads/windows/
+   При установке включите: "Add python.exe to PATH"
+
+2) В PowerShell перейдите в папку проекта:
+   cd "C:\path\to\checketop"
+
+3) Установите зависимости:
+   py -3 -m pip install --upgrade pip
+   py -3 -m pip install pymupdf
+
+Опционально (для qpdf --check):
+   - Chocolatey: choco install qpdf -y
+   - Scoop:      scoop install qpdf
+
+Общее:
+- Запуск Python: используйте `py -3`
+- Перенос строки в PowerShell: обратная кавычка `
+- Для вставки многострочного Python-кода используется here-string: @' ... '@ | py -3 -
+
+==================================================
+Option A (Windows): random 16 digits after 4081 (через Python-блок)
+==================================================
+@'
+import random
+import string
+import subprocess
+
+random_suffix = "".join(random.choice(string.digits) for _ in range(16))
+new_account = "4081" + random_suffix
+
+cmd = [
+    "py", "-3", "rebuild_pdf.py", "input.pdf", "output.pdf",
+    "--donor-pdf", "donor.pdf",
+    "--strict-forensic",
+    "--copy-input-metadata",
+    "--match-input-pdf-version",
+    "--replace", f"40817810980480002476={new_account}",
+    "--replace", "C822202260011245=C422402260359485",
+    "--replace", "1,21=484",
+    "--replace", "30=120",
+    "--replace", "40=4 120",
+    "--replace", "10=4 000",
+    "--replace", "22.02.2026 03:54:46=24.02.2026 12:10:12",
+    "--replace", "22.02.2026 17:49=24.02.2026 12:20",
+    "--replace", "Нуриддинович К.=Насимчонович Д.",
+    "--replace", "+992750094345=+992208483334",
+]
+
+print("Generated account:", new_account)
+print("Running:", " ".join(cmd))
+subprocess.run(cmd, check=True)
+'@ | py -3 -
+
+==================================================
+Option B (Windows): fully manual command (no random)
+==================================================
+py -3 rebuild_pdf.py input.pdf output.pdf `
+  --donor-pdf donor.pdf `
+  --strict-forensic `
+  --replace "40817810980480002476=4081XXXXXXXXXXXXXXX" `
+  --replace "C822202260011245=YOUR_C822_VALUE" `
+  --replace "1,21=121" `
+  --replace "40=1030" `
+  --replace "10=1000" `
+  --replace "22.02.2026 03:54:46=YOUR_DATETIME_1" `
+  --replace "22.02.2026 17:49=YOUR_DATETIME_2" `
+  --replace "Нуриддинович К.=YOUR_NAME" `
+  --replace "+992750094345=YOUR_PHONE"
+
+==================================================
+Post-check (Windows): startxref / %%EOF counts
+==================================================
+@'
+from pathlib import Path
+b = Path("output.pdf").read_bytes()
+print("startxref:", b.count(b"startxref"))
+print("%%EOF:", b.count(b"%%EOF"))
+'@ | py -3 -
+
+==================================================
+Команда для input2 -> output2 (Windows / PowerShell)
+==================================================
+py -3 rebuild_pdf.py input2.pdf output2.pdf `
+  --strict-forensic `
+  --numbers-grow-left `
+  --preserve-font-metrics `
+  --replace "40817810980480002476=40812596657127806329" `
+  --replace "-10,00 RUR=3 000,00 RUR" `
+  --replace "-30,00 RUR=90,00 RUR" `
+  --replace "1 210,00 RUR=6 250,00 RUR" `
+  --replace "125,89 RUR=2 380.30 RUR" `
+  --replace "C822102260080572=C422402260356996" `
+  --replace "Жеребятьев Александр=Роман Артемьев" `
+  --replace "238753=119571" `
+  --replace "Калининградская область=Московская облость" `
+  --replace "ОБЛАСТЬ Калининградская=ОБЛАСТЬ Московская" `
+  --replace "Советск=Москва" `
+  --replace "УЛИЦА Каштановая=Ул. Бакских Комиссаров" `
+  --replace "8В=74" `
+  --replace "78=164" `
+  --replace "C162102261730505=C422402260355493" `
+  --replace "C162102261335322=C422302261311327" `
+  --replace "C162102260074559=C422302261303848" `
+  --replace "992921171936=992201470660" `
+  --replace "21.02.2026=24.02.2026"
+
+==================================================
+Доп. Python-блок из вашего txt (Windows)
+==================================================
+@'
+import random
+import string
+import subprocess
+
+random_suffix = "".join(random.choice(string.digits) for _ in range(16))
+new_account = "4081" + random_suffix
+
+cmd = [
+    "py", "-3", "rebuild_pdf.py", "input.pdf", "output.pdf",
+    "--donor-pdf", "donor.pdf",
+    "--strict-forensic",
+    "--copy-input-metadata",
+    "--match-input-pdf-version",
+    "--replace", f"40817810980480002476={new_account}",
+    "--replace", "C422402260356995=C422402260356996",
+    "--replace", "10=10 000",
+    "--replace", "79003517080=79003562535",
+]
+
+print("Generated account:", new_account)
+print("Running:", " ".join(cmd))
+subprocess.run(cmd, check=True)
+'@ | py -3 -

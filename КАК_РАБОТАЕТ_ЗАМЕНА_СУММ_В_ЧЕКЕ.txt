@@ -1,0 +1,237 @@
+================================================================================
+  ПОДРОБНОЕ ОПИСАНИЕ: Как работает замена сумм в чеках (PDF-квитанциях)
+================================================================================
+
+Документ описывает три подхода из проекта чекетоп и принципы для адаптации
+в другой скрипт.
+
+--------------------------------------------------------------------------------
+1. ОБЩАЯ КАРТИНА: Три способа заменить сумму в PDF-чеке
+--------------------------------------------------------------------------------
+
+1.1. cid_patch_amount.py — низкоуровневый патч (CID-кодировка)
+     Прямая правка бинарного PDF. Ничего не пересобирает.
+     
+1.2. content_stream_replace.py — высокоуровневый (PyMuPDF + redaction)
+     Находит текст через API, рисует поверх или делает redaction.
+     
+1.3. rebuild_pdf.py — пересборка PDF
+     Перерисовывает документ с нуля и применяет замены на этапе сборки.
+
+
+--------------------------------------------------------------------------------
+2. МЕТОД 1: cid_patch_amount.py (точечный патч PDF)
+--------------------------------------------------------------------------------
+
+ИДЕЯ:
+В PDF текст хранится не как строки Unicode, а как последовательность 
+CID (Character ID) шрифта. Чтобы заменить "160 RUR" на "1 600 RUR" без 
+пересборки, нужно:
+  a) узнать маппинг Unicode → CID из ToUnicode CMap;
+  b) найти hex-представление старой суммы в content stream;
+  c) заменить на hex-представление новой суммы;
+  d) скорректировать /Length потока и xref-таблицу.
+
+ШАГИ РАБОТЫ:
+
+2.1. Парсинг ToUnicode CMap
+    • Ищется stream с beginbfchar в декомпрессированных потоках:
+      re.finditer(rb"<<(.*?)/Length\s+(\d+)(.*?)>>\s*stream\r?\n", data, re.DOTALL)
+    • Для каждого символа: <CID_hex> <Unicode_hex> 
+      Пример: <000B> <0020> → пробел U+0020 → CID 000B
+    • Строится словарь: uni_to_cid[unicode_codepoint] = "000B" (4 символа)
+    • Нюанс: если U+0020 (пробел) отсутствует, но есть U+00A0 (nbsp) — 
+      пробел кодируется как nbsp:
+      if cp == 0x20 and 0x20 not in uni_to_cid and 0xA0 in uni_to_cid:
+          cp = 0xA0
+
+2.2. Кодирование текста в CID hex
+    • Функция _encode_cid(text, uni_to_cid) → bytes | None
+    • Для каждого символа text: ord(c) → uni_to_cid[cp]
+    • Результат: b"<000C000B000A>" — конкатенация CID в угловых скобках
+    • Если хоть один символ не в CMap — возвращается None
+
+2.3. Варианты старого значения (trailing space / nbsp)
+    В PDF сумма может храниться как:
+      • "160 RUR"
+      • "160 RUR "  (с обычным пробелом в конце)
+      • "160 RUR\u00a0" (с неразрывным пробелом в конце)
+    Проверяются все три варианта:
+      old_variants = [old_amount, old_amount + " ", old_amount + "\u00a0"]
+
+2.4. Поиск старого значения
+    • Сначала в сыром data (несжатый текст)
+    • Если не нашли — ищем в content streams: декомпрессируем каждый stream 
+      (zlib.decompress), проверяем наличие old_hex в dec
+
+2.5. Замена
+    • new_dec = dec.replace(old_hex, new_hex)
+    • new_raw = zlib.compress(new_dec, 9)
+    • delta = len(new_raw) - stream_len
+
+2.6. Обновление структуры PDF (КРИТИЧНО!)
+    После замены меняется длина потока. Нужно обновить:
+    
+    a) /Length stream dict:
+       num_end = len_num_start + len(old_len_str)
+       data[len_num_start:num_end] = new_len_str
+       (Если длина числа изменилась — delta += len(new_len_str) - len(old_len_str))
+    
+    b) xref-таблица:
+       Все объекты с offset > stream_start сдвигаются на delta:
+       new_offset = offset + delta
+       Замена в 10-символьном поле: f"{new_offset:010d}"
+    
+    c) startxref:
+       Если startxref указывает на xref, который сдвинулся:
+       new_xref_pos = old_xref_pos + delta
+
+2.7. Порядок замен (если несколько потоков)
+    Модификации применяются с конца файла (reverse sort по stream_start),
+    чтобы не сбивать позиции при последовательной замене.
+
+ИСПОЛЬЗОВАНИЕ:
+  python3 cid_patch_amount.py input.pdf output.pdf --replace "160 RUR=1 600 RUR"
+  python3 cid_patch_amount.py input.pdf output.pdf -r "OLD1=NEW1" -r "OLD2=NEW2"
+
+
+--------------------------------------------------------------------------------
+3. МЕТОД 2: content_stream_replace.py (PyMuPDF redaction)
+--------------------------------------------------------------------------------
+
+ИДЕЯ:
+Используется высокоуровневый API PyMuPDF (fitz):
+  • page.search_for(old_text) — находит прямоугольники (rect) с текстом
+  • Закрашиваем rect белым и рисуем новый текст поверх
+  • Либо page.add_redact_annot() + page.apply_redactions()
+
+ШАГИ:
+
+3.1. Поиск текста
+    instances = page.search_for(old_text)
+    Возвращает список fitz.Rect с координатами найденного текста
+
+3.2. Получение стиля (размер, цвет)
+    text_dict = page.get_text("dict")
+    Для span с нужным текстом: fontsize, color из span["size"], span["color"]
+
+3.3. Вариант A: draw_rect + insert_text
+    page.draw_rect(rect, color=(1,1,1), fill=(1,1,1))  # закрасить белым
+    page.insert_text(point, new_text, fontsize=..., fontname=..., color=...)
+
+3.4. Вариант B: redaction
+    page.add_redact_annot(rect, text=new_text, fontname=..., fontsize=..., ...)
+    page.apply_redactions()
+
+3.5. Сохранение без лишних изменений
+    doc.save(output_path, garbage=0, deflate=False)
+    --preserve-id: восстановить оригинальный Document ID из trailer
+
+ОГРАНИЧЕНИЯ:
+  • Не работает с Type0/Identity-H шрифтами (CID), т.к. search_for может 
+    не найти текст, записанный через CID
+  • Подходит для простых PDF с обычным текстом
+
+
+--------------------------------------------------------------------------------
+4. МЕТОД 3: rebuild_pdf.py (пересборка с заменой)
+--------------------------------------------------------------------------------
+
+ИДЕЯ:
+Создаётся новый PDF с нуля. Текст извлекается из исходного (spans), 
+к нему применяются замены, затем перерисовывается. Либо в режиме 
+--native-match / --match-pdf-metadata-only используется content из 
+эталонного PDF с CID-патчем.
+
+4.1. Замена на уровне span/text
+    • replace_text(src_text, replacements) — рекурсивная замена по токенам
+    • replacements: Dict[str, list[str]] — {old: [new1, new2, ...]}
+    • Поддержка --numbers-grow-left: для RUR/TJS/UZS числа "растут влево"
+
+4.2. CID-замена в content stream (режим keep_am_fonts)
+    Функция _apply_cid_replacements_to_content(content_dec, replacements, uni_to_cid):
+    
+    a) Точное совпадение:
+       old_hex = _encode_text_to_cid_hex(old, uni_to_cid)
+       if old_hex in content_dec:
+           content_dec = content_dec.replace(old_hex, new_hex)
+    
+    b) Fallback для сумм (важно!):
+       Если в замене есть "RUR" и цифры, но точного old в content нет —
+       Альфа-Банк часто использует "500 RUR" как шаблон в Apple-квитанции.
+       Пробуем заменить fallback-варианты:
+         for fallback_old in ["500 RUR ", "500 RUR\u00a0", "500 RUR"]:
+             if fhex in content_dec:
+                 content_dec = content_dec.replace(fhex, new_hex)
+                 break
+
+4.3. Формат замен
+    CLI: --replace "OLD=NEW"
+    JSON: {"old1": "new1", "old2": "new2"}
+    Дубликаты ключей объединяются: old → [new1, new2] → берётся последний
+
+
+--------------------------------------------------------------------------------
+5. АДАПТАЦИЯ В ДРУГОЙ СКРИПТ: Чек-лист
+--------------------------------------------------------------------------------
+
+5.1. Если нужен минимальный патч без пересборки (как cid_patch_amount.py):
+
+    □ Прочитать PDF как bytearray
+    □ Найти ToUnicode stream (beginbfchar) и построить uni_to_cid
+    □ Добавить fallback пробела: U+0020 → U+00A0 если 0020 нет
+    □ Кодировать old/new в CID hex: "<" + "".join(cids) + ">"
+    □ Проверять варианты: old, old+" ", old+"\u00a0"
+    □ Искать в content streams (zlib.decompress)
+    □ При замене: dec.replace(old_hex, new_hex)
+    □ zlib.compress(new_dec, 9)
+    □ Обновить /Length в stream dict
+    □ Обновить xref: offset += delta для объектов после stream
+    □ Обновить startxref если xref сдвинулся
+    □ При нескольких потоках — применять с конца (reverse)
+
+5.2. Если PDF простой и без CID-шрифтов (как content_stream_replace.py):
+
+    □ fitz.open() → doc
+    □ page.search_for("старая сумма")
+    □ page.get_text("dict") для размера/цвета
+    □ draw_rect + insert_text ИЛИ add_redact_annot + apply_redactions
+    □ save(..., garbage=0, deflate=False)
+
+5.3. Если нужен fallback для "500 RUR" (как в rebuild_pdf):
+
+    □ При замене типа "10 RUR"=X, "160 RUR"=Y и т.п.
+    □ Если exact old не найден и в old есть "RUR" и цифра:
+    □ Пробовать заменить "500 RUR ", "500 RUR\u00a0", "500 RUR" на new_val
+
+5.4. Ключевые regex для PDF:
+    • Stream: rb"<<(.*?)/Length\s+(\d+)(.*?)>>\s*stream\r?\n"
+    • ToUnicode: <cid> <uni> → r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>'
+    • xref: rb"xref\r?\n(\d+)\s+(\d+)\r?\n((?:\d{10}\s+\d{5}\s+[nf]\s*\r?\n)+)"
+    • startxref: rb"startxref\r?\n(\d+)\r?\n"
+
+
+--------------------------------------------------------------------------------
+6. ВАЖНЫЕ НЮАНСЫ
+--------------------------------------------------------------------------------
+
+• Пробелы: в PDF часто используется U+00A0 (nbsp) вместо U+0020
+• Длина /Length: при замене число символов может измениться (123 → 1234) — 
+  тогда delta для xref увеличивается
+• Content stream содержит BT...ET (Begin/End Text) — текст между ними
+• FlateDecode — поток сжат zlib
+• Чек Альфа-Банка: часто Identity-H/Type0 + CID, эталон может иметь "500 RUR"
+
+
+--------------------------------------------------------------------------------
+7. ФАЙЛЫ В ПРОЕКТЕ
+--------------------------------------------------------------------------------
+
+cid_patch_amount.py     — CID-патч, основной скрипт для точечной замены сумм
+content_stream_replace.py — PyMuPDF redaction (для простых PDF)
+rebuild_pdf.py          — полная пересборка, CID-патч в native mode
+
+
+================================================================================
+Конец документа. Создано для адаптации логики в другой скрипт.
+================================================================================

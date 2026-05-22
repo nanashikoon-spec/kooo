@@ -1,0 +1,12 @@
+{
+  "category": "sbp",
+  "output": "receipt_sbp_5000.pdf",
+  "amount": "5 000 RUR",
+  "commission": "0 RUR",
+  "recipient": "Руслан Сергеевич К.",
+  "phone": "79613157070",
+  "bank": "Сбербанк",
+  "message": "Перевод денежных средств",
+  "date_time": "07.03.2026 00:30:06 мск",
+  "date_formed": "07.03.2026 00:30 мск"
+}

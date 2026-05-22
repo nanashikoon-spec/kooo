@@ -1,0 +1,19 @@
+{
+  "category": "tadzhikistan",
+  "donor": "AM_1772740244320.pdf",
+  "output": "receipt_account_replaced.pdf",
+  "keep_donor_id": true,
+  "date_formed": "05.03.2026 22:51 мск",
+  "amount": "10 RUR",
+  "commission": "0 RUR",
+  "course": "1 RUR = 0.1180 TJS",
+  "amount_credited": "1,18 TJS",
+  "date_time": "05.03.2026 22:49:55 мск",
+  "recipient": "E. J.",
+  "phone": "+992977954334",
+  "account": "40817810980480009948",
+  "operation_id": "C820503260101382",
+
+  "_comment": "Все поля как в AM_1772740244320.pdf, только account заменён на 09948. Для сравнения с оригиналом.",
+  "_original_account": "40817810505892410714"
+}

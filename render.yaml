@@ -1,0 +1,19 @@
+# Render.com — Web Service (бесплатно)
+# https://dashboard.render.com → New → Web Service
+services:
+  - type: web
+    name: cheketop-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 run_render.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: PERSISTENT_DIR
+        value: /opt/render/project/data
+    disk:
+      name: cheketop-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1

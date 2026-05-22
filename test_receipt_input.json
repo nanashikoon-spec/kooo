@@ -1,0 +1,12 @@
+{
+  "category": "tadzhikistan",
+  "output": "from_json2.pdf",
+  "amount": "10 000 RUR",
+  "commission": "50 RUR",
+  "amount_credited": "1 200 TJS",
+  "recipient": "Махмуд Р.",
+  "phone": "+992901112233",
+  "account": "40817810980480002476",
+  "operation_id": "C820503269999999",
+  "date_time": "06.03.2026 14:30:00"
+}

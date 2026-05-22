@@ -1,0 +1,15 @@
+{
+  "category": "sbp",
+  "output": "receipt_random.pdf",
+  "amount": "20 000 RUR",
+  "commission": "0 RUR",
+  "recipient": "Демид Андреевич В",
+  "phone": "+7 (921) 102-58-53",
+  "bank": "Озон Банк (Ozon)",
+  "account": "40817292744231106741",
+  "operation_id": "C0660326896874168",
+  "sbp_id": "B030685346P0000000011700501",
+  "message": "Перевод денежных средств",
+  "date_time": "06.03.2026 22:24:04 мск",
+  "date_formed": "06.03.2026 22:24 мск"
+}

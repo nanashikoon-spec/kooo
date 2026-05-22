@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ALLOWED_USER_IDS=${ALLOWED_USER_IDS}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+    env_file:
+      - .env
+
+  bot-test:
+    build: .
+    restart: unless-stopped
+    environment:
+      - BOT_ENV_FILE=/app/.env.test
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+    env_file:
+      - .env.test

@@ -1,0 +1,2 @@
+# Все зависимости — в requirements.txt
+-r requirements.txt

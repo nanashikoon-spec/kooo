@@ -1,0 +1,18 @@
+{
+  "category": "uzbekistan",
+  "output": "receipt_uzbekistan.pdf",
+  "amount_total": "10 000 RUR",
+  "amount_credited": "1 504 430 UZS",
+  "course": "1 UZS = 0.0066137566 RUR",
+  "recipient": "Sirojov M.",
+  "phone": "+998915377732",
+  "bank": "Агробанк, Узбекистан",
+  "account": "40817810280480002477",
+  "operation_id": "C600603260001011",
+  "operation_identifier": "A6064224020380010000051234567890",
+  "date_time": "06.03.2026 01:40:13 мск",
+  "date_formed": "06.03.2026 01:40 мск",
+
+  "_symbols_available": "АБДИКНПСУабвгдежзиклмнопрстуфцчьюяё",
+  "_symbols_missing": "ЁВГЕЖЗЙЛМОРТФХЦЧШЩЪЫЬЭЮЯйхшщъыэ"
+}

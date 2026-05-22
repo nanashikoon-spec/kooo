@@ -1,0 +1,422 @@
+================================================================================
+  КАК РАБОТАЕТ ЗАМЕНА СУММЫ В Т-БАНК ЧЕКЕ — ПОЛНОЕ ОБЪЯСНЕНИЕ
+================================================================================
+
+ОБЩАЯ АРХИТЕКТУРА
+-----------------
+
+Система состоит из трёх слоёв:
+
+  Пользователь (Telegram)
+         │
+         ▼
+  bot_standalone.py          ← управляет диалогом, кнопками, состоянием
+         │
+         ▼
+  tbank_check_service.py     ← делает патч PDF (находит, заменяет, сжимает)
+         │
+         ▼
+  tbank_cmap.py              ← знает, как кодировать буквы/цифры в CID-байты шрифта
+
+
+================================================================================
+ШАГ 1 — ПОЛЬЗОВАТЕЛЬ ОТПРАВЛЯЕТ PDF И НАЖИМАЕТ КНОПКУ
+================================================================================
+
+Когда пользователь отправляет PDF-файл боту, он сохраняется во временный файл
+на диск и создаётся запись в USER_STATE[uid].
+
+Сначала вызывается tbank_detect_type() — она смотрит на высоту страницы в PDF
+(/MediaBox):
+
+  def detect_receipt_type(pdf_path):
+      data = Path(pdf_path).read_bytes()
+      mb_m = re.search(rb"/MediaBox\s*\[\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s*\]", data)
+      if mb_m:
+          height = int(mb_m.group(2))
+          if height <= 420:   return "card"
+          if height >= 510:   return "sbp"
+          if height <= 460:   return "transgran_short"
+          return "transgran"
+      return "sbp"
+
+Высота страницы определяет ТИП ЧЕКА (СБП, карта, трансграничный). Это важно,
+потому что у каждого типа свои координаты полей.
+
+Затем бот извлекает текущие значения полей чека (tbank_extract_fields) — в
+частности текущую сумму, чтобы показать её пользователю. После этого бот
+ставит флаг awaiting = "tbank_new_amount" и ждёт ввода числа.
+
+
+================================================================================
+ШАГ 2 — ПОЛЬЗОВАТЕЛЬ ВВОДИТ НОВУЮ СУММУ
+================================================================================
+
+Когда приходит текстовое сообщение и awaiting == "tbank_new_amount", бот
+парсит число и вызывает функцию патча:
+
+  def _run_tbank_amount_patch(token, uid, chat_id, state, tg_req):
+      new_amount = state.get("tbank_new_amount", 0)
+      rtype = state.get("tbank_type", "sbp")
+      pdf_bytes = tbank_patch_amount(state["file_path"], new_amount, rtype)
+
+Вся низкоуровневая работа делегируется в tbank_check_service.patch_amount().
+
+
+================================================================================
+ШАГ 3 — patch_amount() В tbank_check_service.py
+================================================================================
+
+  def patch_amount(pdf_path, new_amount, receipt_type="sbp"):
+      pdf_bytes = Path(pdf_path).read_bytes()
+      f1_widths, f2_widths = extract_pdf_font_widths(pdf_bytes)
+      len_num_start, stream_start, stream_len, decompressed = _find_page_stream(pdf_bytes)
+      f2_renderable = get_renderable_chars(pdf_bytes, "medium")
+      amount_str = _format_amount_str(new_amount) + " "
+      fields = _get_field_labels(receipt_type)
+      changes = {}
+      for field in fields:
+          if field["key"] in ("amount_bold", "amount_small"):
+              changes[field["key"]] = amount_str
+      new_stream = _replace_all_fields_in_stream(decompressed, fields, changes, ...)
+      pdf_bytes = _recompress_zero_delta(pdf_bytes, stream_start, stream_len, new_stream)
+      return pdf_bytes
+
+
+--------------------------------------------------------------------------------
+ШАГ 3А — ФОРМАТИРОВАНИЕ СУММЫ
+--------------------------------------------------------------------------------
+
+  def _format_amount_str(amount):
+      # 10 → "10",  1500 → "1 500",  1500.50 → "1 500.50"
+      if amount == int(amount):
+          s = f"{int(amount):,}".replace(",", " ")
+      else:
+          integer_part = int(amount)
+          decimal_part = f"{amount:.2f}".split(".")[1]
+          s = f"{integer_part:,}".replace(",", " ") + "." + decimal_part
+      return s
+
+Число 1500 превращается в строку "1 500" (пробел как разделитель тысяч).
+К этой строке добавляется пробел в конце: "1 500 ". Это важно — в PDF
+Т-Банк сумма всегда заканчивается пробелом.
+
+
+--------------------------------------------------------------------------------
+ШАГ 3Б — НАХОЖДЕНИЕ CONTENT STREAM В PDF
+--------------------------------------------------------------------------------
+
+PDF-файл — это бинарный формат. Текст страницы хранится внутри content stream
+— блока данных, сжатого через zlib (алгоритм Deflate/FlateDecode).
+
+  def _find_page_stream(pdf_bytes):
+      for m in re.finditer(rb"<<(.*?)/Length\s+(\d+)(.*?)>>\s*stream\r?\n",
+                           pdf_bytes, re.DOTALL):
+          stream_len = int(m.group(2))
+          stream_start = m.end()
+          len_num_start = m.start(2)
+          dec = zlib.decompress(pdf_bytes[stream_start : stream_start + stream_len])
+          if b"BT" not in dec:
+              continue
+          return len_num_start, stream_start, stream_len, dec
+
+Функция:
+  1. Ищет заголовок << /Length NNN >> stream через регулярное выражение
+  2. Декомпрессирует поток через zlib.decompress()
+  3. Проверяет, что внутри есть BT (Begin Text) — признак текстового контента
+  4. Возвращает: позицию числа /Length, позицию начала данных, длину и
+     декомпрессированные байты
+
+
+--------------------------------------------------------------------------------
+ШАГ 3В — ЗАМЕНА ПОЛЕЙ В ДЕКОМПРЕССИРОВАННОМ ПОТОКЕ
+--------------------------------------------------------------------------------
+
+Вызывается _replace_all_fields_in_stream(), которая итерируется по полям чека.
+Каждое поле имеет ФИКСИРОВАННЫЕ КООРДИНАТЫ Y И X — константы из SBP_FIELDS /
+CARD_FIELDS / TRANSGRAN_FIELDS. Например, для СБП:
+
+  {"key": "amount_bold",  "y": 412.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right"}
+  {"key": "amount_small", "y": 336.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right"}
+
+Жирная сумма (amount_bold) — Y=412.39pt, мелкая (amount_small) — Y=336.78pt.
+
+
+--------------------------------------------------------------------------------
+ШАГ 3Г — НАХОЖДЕНИЕ НУЖНОГО Tj-ОПЕРАТОРА ПО КООРДИНАТАМ
+--------------------------------------------------------------------------------
+
+Внутри content stream PDF текст выглядит так:
+
+  BT
+    1 0 0 1 217.30 412.39 Tm     ← позиционирование (x=217.3, y=412.39)
+    /F2 16 Tf                    ← выбор шрифта
+    (\x01\x32\x01\x35\x01\x36) Tj   ← CID-байты текста
+  ET
+
+Функция find_tj_at_coords() ищет Tj (Text Show) вблизи нужных координат:
+
+  def find_tj_at_coords(stream, target_y, target_x, tol_y=1.5, tol_x=8.0):
+      tms = list(re.finditer(TM_REGEX, stream))   # все Tm (позиции)
+      tjs = list(re.finditer(TJ_REGEX, stream))   # все Tj (тексты)
+      for tj in tjs:
+          # Находим ближайший предшествующий Tm
+          closest_tm = None
+          for tm in tms:
+              if tm.end() <= tj.start():
+                  closest_tm = tm
+              else:
+                  break
+          x = float(closest_tm.group(1))
+          y = float(closest_tm.group(2))
+          if abs(y - target_y) < tol_y and abs(x - target_x) < tol_x:
+              raw = unescape_pdf_literal(tj.group(1))
+              return raw, tj.start(), tj.end()
+
+Для каждого (...)Tj находим ближайший предшествующий Tm. Если X/Y совпадают
+с нужными в пределах допуска (tol_x, tol_y), это нужный элемент. Возвращается:
+сырые CID-байты, позиция начала и конца в потоке.
+
+
+--------------------------------------------------------------------------------
+ШАГ 3Д — КОДИРОВКА ТЕКСТА В CID
+--------------------------------------------------------------------------------
+
+Т-Банк использует шрифт TinkoffSans с кодировкой Identity-H — каждый символ
+хранится как 2-байтовый CID (Character ID), а не как UTF-8 или ASCII.
+
+В tbank_cmap.py есть жёстко прописанная таблица маппинга Unicode → CID:
+
+  REGULAR_UNI_TO_CID = {
+      0x0030: 0x0131,  # 0
+      0x0031: 0x0132,  # 1
+      0x0032: 0x0133,  # 2
+      ...
+      0x0039: 0x013A,  # 9
+      0x0020: 0x0003,  # пробел
+      ...
+  }
+
+Функция encode_text():
+
+  def encode_text(text, font="regular"):
+      table = REGULAR_UNI_TO_CID if font == "regular" else MEDIUM_UNI_TO_CID
+      result = bytearray()
+      for ch in text:
+          cid = table[ord(ch)]
+          result.append((cid >> 8) & 0xFF)
+          result.append(cid & 0xFF)
+      return bytes(result)
+
+Пример: строка "1 500 " кодируется так:
+  '1' → U+0031 → CID 0x0132 → байты \x01\x32
+  ' ' → U+0020 → CID 0x0003 → байты \x00\x03
+  '5' → U+0035 → CID 0x0136 → байты \x01\x36
+  '0' → U+0030 → CID 0x0131 → байты \x01\x31
+  '0' → U+0030 → CID 0x0131 → байты \x01\x31
+  ' ' → U+0020 → CID 0x0003 → байты \x00\x03
+
+Итого: \x01\x32\x00\x03\x01\x36\x01\x31\x01\x31\x00\x03
+
+
+--------------------------------------------------------------------------------
+ШАГ 3Е — ПОДСТАНОВКА НОВОГО Tj И КОРРЕКТИРОВКА X-КООРДИНАТЫ
+--------------------------------------------------------------------------------
+
+Это делается в _replace_field_bytes():
+
+  def _replace_field_bytes(stream, target_y, target_x, new_text, font_size,
+                           right_aligned=True, widths=None, font="regular", ...):
+      found = find_tj_at_coords(stream, target_y, target_x, ...)
+      old_raw, tj_start, tj_end = found
+
+      new_raw = encode_text(new_text, font)
+      new_escaped = escape_pdf_literal(new_raw)
+      new_tj = b"(" + new_escaped + b")Tj"
+
+      if right_aligned:
+          old_width = cid_width_pt(old_raw, font_size, widths)
+          new_width = cid_width_pt(new_raw, font_size, widths)
+          wall = anchor_x + old_width      # правый край (неизменная стена)
+          new_x = wall - new_width         # новое начало
+
+          new_tm = f"1 0 0 1 {new_x:.2f} {y_str} Tm".encode()
+          stream = stream[:tm_start] + new_tm + stream[tm_end:]  # заменяем Tm
+          # корректируем позиции tj_start/tj_end с учётом дельты
+
+      stream = stream[:tj_start] + new_tj + stream[tj_end:]  # заменяем Tj
+      return stream
+
+ПОЧЕМУ ВАЖЕН ПЕРЕСЧЁТ X:
+Суммы в чеке выровнены по правому краю. Если старая сумма "100 " (узкая),
+а новая "10 000 " (широкая), то X-начало нового текста должно сместиться
+влево, чтобы правый край остался на том же месте.
+
+Алгоритм расчёта:
+  1. old_width — ширина старого текста в pt (по таблице ширин шрифта /W)
+  2. wall = anchor_x + old_width — правый край (неизменная стена)
+  3. new_width — ширина нового текста
+  4. new_x = wall - new_width — новое начало (левее, если текст длиннее)
+
+Ширины берутся из таблицы /W шрифта в самом PDF (extract_pdf_font_widths()),
+а как fallback — из хардкодированных REGULAR_WIDTHS / MEDIUM_WIDTHS
+в tbank_cmap.py.
+
+ПРОВЕРКА ГЛИФОВ:
+Шрифт в PDF встроен не полностью — только те глифы, которые были в
+оригинальном чеке. Функция get_renderable_chars() парсит glyf-таблицу шрифта
+через fontTools и проверяет, что все цифры новой суммы реально существуют
+в глифовой таблице. Если какой-то цифры нет — поле пропускается, а бот
+предупреждает пользователя заранее.
+
+
+================================================================================
+ШАГ 4 — ОБРАТНАЯ КОМПРЕССИЯ С НУЛЕВОЙ ДЕЛЬТОЙ
+================================================================================
+
+После замены байтов в декомпрессированном потоке нужно снова сжать его и
+вставить обратно в PDF. Здесь самая хитрая часть:
+
+  def _recompress_zero_delta(pdf_bytes, stream_start, old_stream_len,
+                             new_decompressed, len_num_start=0):
+      target = old_stream_len  # нужно получить ровно столько байт
+
+      def _try_compress(data):
+          for level in (6, 7, 8, 9, 5, 4, 3, 2, 1):
+              c = zlib.compress(data, level)
+              if len(c) == target:
+                  return c
+              for mem in (4, 5, 6, 7, 8, 9):
+                  co = zlib.compressobj(level, zlib.DEFLATED, 15, mem, 0)
+                  c2 = co.compress(data) + co.flush()
+                  if len(c2) == target:
+                      return c2
+          return None
+
+      # Попытка 1: без паддинга
+      exact = _try_compress(new_decompressed)
+      if exact:
+          data = bytearray(pdf_bytes)
+          data[stream_start : stream_start + old_stream_len] = exact
+          return bytes(data)
+
+      # Попытка 2: добавляем \n в конец (до 1200 символов)
+      for pad in range(1, 1200):
+          candidate = new_decompressed + b"\n" * pad
+          exact = _try_compress(candidate)
+          if exact:
+              data = bytearray(pdf_bytes)
+              data[stream_start : stream_start + old_stream_len] = exact
+              return bytes(data)
+
+      # Fallback: _recompress_and_fix() — обновляет /Length, xref, startxref
+      return _recompress_and_fix(pdf_bytes, len_num_start, stream_start,
+                                 old_stream_len, new_decompressed)
+
+ПОЧЕМУ НУЖНА НУЛЕВАЯ ДЕЛЬТА:
+В PDF-файле есть xref-таблица — это индекс, где хранятся байтовые позиции
+всех объектов. Если размер сжатого потока изменится, все последующие позиции
+сдвинутся. PDF станет невалидным или будет выглядеть подозрительно при
+форензическом анализе.
+
+Алгоритм:
+  1. Пробуем разные уровни сжатия zlib (1–9) и разные параметры mem —
+     ищем комбинацию, при которой сжатый результат будет РОВНО того же
+     размера, что оригинал.
+  2. Если не получается — добавляем \n (пустые строки) в конец
+     декомпрессированных данных как паддинг. Пустые строки в content
+     stream игнорируются PDF-рендерером, на отображение не влияют.
+     Пробуем до 1200 символов.
+  3. Если и это не помогло — fallback (_recompress_and_fix): обновляем
+     /Length в stream dict, патчим xref-таблицу (все offset > stream_start
+     сдвигаются на delta) и startxref.
+
+Это исключительно умная техника: PDF остаётся байт-в-байт совместимым по
+размеру, что обходит большинство автоматических проверок целостности файла.
+
+
+================================================================================
+ШАГ 5 — ОТПРАВКА РЕЗУЛЬТАТА ПОЛЬЗОВАТЕЛЮ
+================================================================================
+
+PDF сохраняется во временный файл, отправляется через Telegram Bot API
+методом sendDocument как multipart/form-data (без внешних библиотек — только
+urllib.request из стандартной библиотеки Python), затем временный файл
+удаляется.
+
+После отправки бот показывает кнопки "Изменить сумму снова" и "Готово".
+Оригинальный загруженный файл остаётся в памяти, пока пользователь не
+завершит сессию.
+
+
+================================================================================
+ПОЛНАЯ СХЕМА РАБОТЫ
+================================================================================
+
+  Пользователь → [отправляет PDF]
+       ↓
+  bot_standalone.py сохраняет файл, показывает кнопки:
+     [💰 Только сумма] [💰 Сумма + 4 цифры счёта] [📋 Все поля] [🌍 Трансгран]
+       ↓
+  [нажимает «Только сумма»]
+       ↓
+  tbank_detect_type()    → по высоте MediaBox: "sbp" / "card" / "transgran"
+  tbank_extract_fields() → читает текущие значения полей из PDF
+       ↓
+  Бот показывает текущую сумму, просит ввести новую
+       ↓
+  [пользователь вводит: 15000]
+       ↓
+  _run_tbank_amount_patch()
+       ↓
+  tbank_check_service.patch_amount()
+    1. Читает PDF как байты
+    2. extract_pdf_font_widths() — извлекает таблицу ширин шрифта из PDF
+    3. _find_page_stream() — декомпрессирует content stream (zlib)
+    4. get_renderable_chars() — проверяет, какие цифры есть в шрифте
+    5. _format_amount_str(15000) → "15 000 "
+    6. _replace_all_fields_in_stream():
+       → для "amount_bold" (y=412.39, F2/Medium, 16pt):
+           find_tj_at_coords() → находит Tj по координатам
+           encode_text("15 000 ", "medium") → CID-байты
+           пересчёт x-координаты (right-align через ширины глифов)
+           заменяет Tm + Tj в потоке
+       → для "amount_small" (y=336.78, F1/Regular, 9pt):
+           аналогично
+    7. _recompress_zero_delta():
+       → пробует разные уровни zlib + паддинг \n
+       → получает сжатый поток ТОГО ЖЕ размера
+       → вставляет обратно в PDF, ничего не сдвигается
+       ↓
+  Готовые байты → временный файл → sendDocument → пользователь получает PDF
+
+
+================================================================================
+КЛЮЧЕВЫЕ ТЕХНИЧЕСКИЕ ДЕТАЛИ
+================================================================================
+
+  Формат шрифта      Identity-H, 2 байта на символ (CID)
+  Таблица маппинга   Жёстко прописана в tbank_cmap.py (извлечена из реальных PDF)
+  Выравнивание       Пересчёт X через ширины глифов из /W таблицы шрифта
+  Сжатие потока      zlib + подбор паддинга для нулевой дельты размера
+  xref не трогается  Если _recompress_zero_delta успешен
+  Проверка глифов    get_renderable_chars() парсит glyf через fontTools
+  Два поля суммы     amount_bold (F2/Medium, 16pt) + amount_small (F1/Regular, 9pt)
+
+  TM_REGEX = rb"1 0 0 1 ([\d.]+) ([\d.]+) Tm"   ← позиция текста в потоке
+  TJ_REGEX = rb"\(((?:[^()\\]|\\.)*)\)Tj"        ← текст (CID-байты) в потоке
+
+
+================================================================================
+ФАЙЛЫ ПРОЕКТА
+================================================================================
+
+  bot_standalone.py        — Telegram-бот: диалог, состояния, кнопки, отправка
+  tbank_check_service.py   — патч PDF: поиск потока, замена полей, компрессия
+  tbank_cmap.py            — таблицы CID, кодирование/декодирование, ширины
+  tbank_scratch_service.py — генерация чека с нуля (на основе donor PDF)
+
+
+================================================================================
+Конец документа.
+================================================================================
