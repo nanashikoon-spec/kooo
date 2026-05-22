@@ -4546,10 +4546,16 @@ def run_bot(token: str) -> None:
     offset = 0
     print("Бот запущен (без зависимостей)...")
 
+    _ALLOWED_UPDATES = ["message", "callback_query"]
+
     while True:
         try:
-            # timeout 10 — короткий long-poll, меньше обрывов на нестабильной сети
-            r = tg_request(token, "getUpdates", {"offset": offset, "timeout": 10})
+            # timeout 25 — стандартный long-poll; urlopen timeout в tg_request = 35
+            r = tg_request(token, "getUpdates", {
+                "offset": offset,
+                "timeout": 25,
+                "allowed_updates": _ALLOWED_UPDATES,
+            })
         except urllib.error.HTTPError as e:
             body = ""
             try:
@@ -4558,10 +4564,15 @@ def run_bot(token: str) -> None:
                 pass
             err_msg = body or e.reason
             if e.code == 400:
-                offset = 0
+                # НЕ сбрасываем offset в 0 — иначе старые апдейты проигрываются заново.
+                # Сбрасываем только если ошибка явно о webhook-конфликте.
                 print(f"⚠️ getUpdates 400: {err_msg[:120]}")
                 if "webhook" in err_msg.lower():
-                    print("   Подсказка: webhook мог остаться — перезапустите бота.")
+                    print("   Webhook-конфликт — удаляем webhook и продолжаем.")
+                    try:
+                        tg_request(token, "deleteWebhook", {"drop_pending_updates": False})
+                    except Exception:
+                        pass
             else:
                 print(f"Ошибка getUpdates HTTP {e.code}: {err_msg[:80]}")
             time.sleep(5)
