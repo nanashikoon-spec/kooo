@@ -3766,6 +3766,8 @@ def _validate_generated_alfa_sbp(pdf_bytes: bytes, expected_sbp_id: str | None =
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         text = doc[0].get_text() if doc.page_count else ""
         doc.close()
+    except ImportError:
+        return []  # fitz not installed — skip semantic check, allow PDF through
     except Exception as e:
         return [f"не смог прочитать PDF: {e}"]
 
