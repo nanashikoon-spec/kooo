@@ -824,21 +824,42 @@ def generate_sbp_receipt(
                 raise RuntimeError(f"Font surgery failed — still missing: {sorted(still_missing)}")
             print("[INFO] Font surgery complete.")
         else:
-            # fonttools not installed — try to find a zero-missing donor instead
-            print(f"[WARN] fonttools not available, searching for zero-missing donor "
-                  f"(missing from current: {sorted(missing)})")
-            perfect_donor, perfect_missing = _find_best_donor(all_new_text_base)
-            if perfect_donor is not None and perfect_missing == 0:
-                donor_file = perfect_donor
-                pdf_bytes = donor_file.read_bytes()
-                cmap = _cmap_from_pdf(pdf_bytes)
-                print(f"[INFO] Switched to zero-missing donor: {donor_file.name}")
-            else:
-                missing_chars = sorted(missing)
-                raise RuntimeError(
-                    f"Символы {missing_chars} отсутствуют во всех донорских PDF. "
-                    "Попробуйте другое имя получателя или банк."
+            # fonttools not installed — try to install it on-the-fly, then retry
+            print(f"[WARN] fonttools not available — attempting on-the-fly install ...")
+            try:
+                import subprocess as _sp
+                _sp.check_call(
+                    [sys.executable, "-m", "pip", "install", "fonttools>=4.43.0", "--quiet"],
+                    stdout=_sp.DEVNULL,
                 )
+                _fonttools_ok = True
+                print("[INFO] fonttools installed OK — retrying font surgery")
+            except Exception as _pip_err:
+                print(f"[WARN] pip install fonttools failed: {_pip_err}")
+
+            if _fonttools_ok:
+                from font_extend import extend_font_in_pdf
+                pdf_bytes, cmap = extend_font_in_pdf(
+                    pdf_bytes, all_new_text_base, glyph_source=glyph_source
+                )
+                still_missing = _chars_missing(cmap, all_new_text_base)
+                if still_missing:
+                    raise RuntimeError(f"Font surgery failed — still missing: {sorted(still_missing)}")
+                print("[INFO] Font surgery complete (after on-the-fly install).")
+            else:
+                # Last resort: find zero-missing donor
+                perfect_donor, perfect_missing = _find_best_donor(all_new_text_base)
+                if perfect_donor is not None and perfect_missing == 0:
+                    donor_file = perfect_donor
+                    pdf_bytes = donor_file.read_bytes()
+                    cmap = _cmap_from_pdf(pdf_bytes)
+                    print(f"[INFO] Switched to zero-missing donor: {donor_file.name}")
+                else:
+                    missing_chars = sorted(missing)
+                    raise RuntimeError(
+                        f"Символы {missing_chars} отсутствуют во всех донорских PDF. "
+                        "Попробуйте другое имя получателя или банк."
+                    )
     else:
         print("[INFO] All characters already in font.")
 

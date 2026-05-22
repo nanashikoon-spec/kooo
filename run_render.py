@@ -10,10 +10,30 @@ UptimeRobot (бесплатно) для пинга каждые 5 мин.
 """
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Ensure critical packages are installed (guards against stale pip cache on Render)
+def _ensure_packages() -> None:
+    _needed = {"fontTools": "fonttools>=4.43.0", "fitz": "PyMuPDF>=1.23.0"}
+    for mod, pkg in _needed.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            print(f"[render] {mod} not found — installing {pkg} ...", flush=True)
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", pkg, "--quiet"],
+                    stdout=subprocess.DEVNULL,
+                )
+                print(f"[render] {pkg} installed OK", flush=True)
+            except Exception as exc:
+                print(f"[render] WARNING: could not install {pkg}: {exc}", flush=True)
+
+_ensure_packages()
 
 # PORT обязателен для Render: https://render.com/docs/web-services#port-binding
 PORT = int(os.environ.get("PORT", 10000))
