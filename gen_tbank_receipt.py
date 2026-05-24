@@ -60,24 +60,38 @@ def _renderable_f2_chars_for(donor_path: Path) -> set[int] | None:
     return chars
 
 
-def _all_donors() -> list[Path]:
-    """All available T-Bank donor PDFs (verified first, enriched last)."""
-    verified = sorted(
-        p for p in TBANK_DIR.glob("tbank_sbp_verified_*.pdf")
-        if "_enriched" not in p.stem
-    )
-    fresh = sorted(
-        p for p in TBANK_DIR.glob("tbank_sbp_*.pdf")
-        if not p.name.startswith("tbank_sbp_verified_")
-    )
-    enriched = sorted(TBANK_DIR.glob("*_enriched.pdf"))
-    legacy = [
-        p for p in sorted(TBANK_DIR.glob("*.pdf"))
-        if not p.name.startswith("tbank_sbp_") and "_enriched" not in p.stem
+def _all_donors(*, integrity_only: bool = False) -> list[Path]:
+    """All available T-Bank donor PDFs safe for external verification."""
+    from tbank_check_service import donor_keywords_ok, _is_blocked_donor
+
+    base: list[Path] = []
+    for p in sorted(TBANK_DIR.glob("tbank_sbp_verified_*.pdf")):
+        if "_enriched" in p.stem:
+            continue
+        if _is_blocked_donor(p) or not donor_keywords_ok(p):
+            continue
+        base.append(p)
+
+    for p in sorted(TBANK_DIR.glob("tbank_sbp_*.pdf")):
+        if "_enriched" in p.stem or p.name.startswith("tbank_sbp_verified_"):
+            continue
+        if _is_blocked_donor(p) or not donor_keywords_ok(p):
+            continue
+        base.append(p)
+
+    if integrity_only:
+        return base
+
+    allowed_stems = {p.stem for p in base}
+    enriched = [
+        p
+        for p in sorted(TBANK_DIR.glob("*_enriched.pdf"))
+        if p.stem.replace("_enriched", "") in allowed_stems
     ]
+
     seen: set[Path] = set()
     ordered: list[Path] = []
-    for group in (verified, fresh, enriched, legacy):
+    for group in (base, enriched):
         for p in group:
             rp = p.resolve()
             if rp in seen:
@@ -87,9 +101,9 @@ def _all_donors() -> list[Path]:
     return ordered
 
 
-def _resolve_donor_path(donor_path: Path) -> Path:
+def _resolve_donor_path(donor_path: Path, *, preserve_integrity: bool = False) -> Path:
     """Prefer enriched donor variant so F2 digits render in amount_bold."""
-    if "_enriched" in donor_path.stem:
+    if preserve_integrity or "_enriched" in donor_path.stem:
         return donor_path
 
     enriched_path = donor_path.with_stem(donor_path.stem + "_enriched")
@@ -116,17 +130,17 @@ def _verified_donors(candidates: list[Path]) -> list[Path]:
 
 
 def _donor_priority(d: Path) -> tuple[int, str]:
-    """Lower tuple sorts earlier: verified UUID donors win."""
+    """Lower tuple sorts earlier: verified UUID donors win over md5/991."""
     from tbank_check_service import _parse_keywords
 
-    score = 2
+    score = 3
     try:
         parsed = _parse_keywords(d.read_bytes())
         if parsed:
             _, hash_part, suffix = parsed
             if "-" in hash_part and suffix in ("10817", "9686"):
                 score = 0
-            elif suffix != "991":
+            elif "-" not in hash_part and suffix == "991":
                 score = 1
     except Exception:
         pass
@@ -139,6 +153,7 @@ def _find_donor(
     prefer_enriched: bool = False,
     text_fields: Optional[dict[str, str]] = None,
     require_full_sbp: bool = True,
+    preserve_integrity: bool = False,
 ) -> Path:
     """Pick an SBP donor from TBANK/.
 
@@ -162,16 +177,16 @@ def _find_donor(
                 _TYPE_CACHE[p] = "sbp"
         return _TYPE_CACHE[p]
 
-    all_donors = _all_donors()
+    all_donors = _all_donors(integrity_only=preserve_integrity)
     if not all_donors:
         raise FileNotFoundError(
             "Не найдены донорские PDF для Т-Банка. "
             "Положите файлы в папку TBANK/ проекта."
         )
 
-    verified = _verified_donors(all_donors)
-    if verified:
-        all_donors = verified
+    safe_donors = _verified_donors(all_donors)
+    if safe_donors:
+        all_donors = safe_donors
 
     # Filter out SBP_SHORT donors when full layout is required
     if require_full_sbp:
@@ -216,20 +231,33 @@ def _find_donor(
                     best_partial = (missing_count, d)
                 continue
 
-        # F1 coverage OK — now also check F2 has all digit glyphs (needed for amount_bold)
-        f2_chars = _renderable_f2_chars_for(d)
-        if f2_chars is not None and not _DIGIT_CODEPOINTS.issubset(f2_chars):
-            # F2 missing digits — try to upgrade to enriched version
-            if "_enriched" not in d.stem:
-                enriched_candidate = d.with_stem(d.stem + "_enriched")
-                if enriched_candidate in all_donors_set:
-                    d = enriched_candidate
+        # F1 coverage OK — F2 digit glyphs: skip enrich when preserving integrity
+        # (font stream injection breaks external integrity checks).
+        if not preserve_integrity:
+            f2_chars = _renderable_f2_chars_for(d)
+            if f2_chars is not None and not _DIGIT_CODEPOINTS.issubset(f2_chars):
+                if "_enriched" not in d.stem:
+                    enriched_candidate = d.with_stem(d.stem + "_enriched")
+                    if enriched_candidate in all_donors_set:
+                        d = enriched_candidate
+                    else:
+                        try:
+                            from tbank_enrich_donor import enrich_pdf
+
+                            if enrich_pdf(d, enriched_candidate):
+                                d = enriched_candidate
+                                all_donors_set.add(enriched_candidate.resolve())
+                            else:
+                                continue
+                        except Exception:
+                            continue
                 else:
-                    # No enriched version available — skip (would produce invisible digits)
                     continue
 
         if "_enriched" in d.stem:
             eligible_enriched.append(d)
+        elif d.name.startswith("tbank_sbp_verified_"):
+            eligible_fresh.append(d)
         elif d.name.startswith("tbank_sbp_"):
             eligible_fresh.append(d)
         else:
@@ -239,16 +267,26 @@ def _find_donor(
         pool = eligible_fresh + eligible_enriched + eligible_legacy
         top_score = min(_donor_priority(p)[0] for p in pool)
         best = [p for p in pool if _donor_priority(p)[0] == top_score]
-        if eligible_fresh:
-            fresh_best = [p for p in best if p.name.startswith("tbank_sbp_")]
-            if fresh_best:
-                return random.choice(fresh_best)
+        verified_best = [p for p in best if p.name.startswith("tbank_sbp_verified_")]
+        if verified_best:
+            return random.choice(verified_best)
+        fresh_best = [
+            p
+            for p in best
+            if p.name.startswith("tbank_sbp_")
+            and not p.name.startswith("tbank_sbp_verified_")
+        ]
+        if fresh_best:
+            return random.choice(fresh_best)
         if eligible_enriched:
             enr_best = [p for p in best if "_enriched" in p.stem]
             if enr_best:
                 return random.choice(enr_best)
         if eligible_legacy:
-            legacy_best = [p for p in best if p not in eligible_fresh and p not in eligible_enriched]
+            legacy_best = [
+                p for p in best
+                if p not in eligible_fresh and p not in eligible_enriched
+            ]
             if legacy_best:
                 return random.choice(legacy_best)
         return random.choice(best)
@@ -325,8 +363,13 @@ def generate_tbank_receipt(
     receipt_number: str = "auto",
     donor_path: Optional[Path] = None,
     output_path: Optional[Path] = None,
+    preserve_integrity: bool = True,
 ) -> tuple[bytes, str]:
     """Generate a T-Bank SBP receipt PDF by patching a donor.
+
+    When preserve_integrity=True (default), only the page content stream is
+    patched with zero-delta recompression. /Keywords, dates and /ID stay
+    untouched — required for external «Целостность PDF: Да» checks.
 
     Returns (pdf_bytes, filename).
     """
@@ -365,22 +408,29 @@ def generate_tbank_receipt(
     }
 
     if donor_path is None:
-        donor_path = _find_donor(text_fields=changes)
+        donor_path = _find_donor(
+            text_fields=changes,
+            preserve_integrity=preserve_integrity,
+        )
 
-    donor_path = _resolve_donor_path(donor_path)
+    donor_path = _resolve_donor_path(
+        donor_path, preserve_integrity=preserve_integrity
+    )
 
     receipt_type = detect_receipt_type(donor_path)
 
     pdf_bytes = patch_all_fields(donor_path, changes, receipt_type)
 
-    # Update metadata to match the generated receipt datetime.
-    try:
-        dt = datetime.strptime(f"{operation_date} {operation_time}", "%d.%m.%Y %H:%M:%S")
-    except ValueError:
-        dt = datetime.now()
-    pdf_bytes = _update_keywords(pdf_bytes, dt)
-    pdf_bytes = _update_dates(pdf_bytes, dt)
-    pdf_bytes = _update_doc_id(pdf_bytes)
+    if not preserve_integrity:
+        try:
+            dt = datetime.strptime(
+                f"{operation_date} {operation_time}", "%d.%m.%Y %H:%M:%S"
+            )
+        except ValueError:
+            dt = datetime.now()
+        pdf_bytes = _update_keywords(pdf_bytes, dt)
+        pdf_bytes = _update_dates(pdf_bytes, dt)
+        pdf_bytes = _update_doc_id(pdf_bytes)
 
     # Build filename
     date_tag = operation_date.replace(".", "")

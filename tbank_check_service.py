@@ -61,12 +61,26 @@ def _find_tbank_donor(receipt_type: str) -> Path:
     return fallback.get(receipt_type, fallback["sbp"])
 
 def _pick_template(receipt_type: str) -> Path:
-    """Pick the best template for a receipt type, preferring enriched donors."""
-    enriched = sorted(_TBANK_DIR.glob("*_enriched.pdf")) if _TBANK_DIR.exists() else []
+    """Pick the best template for a receipt type, preferring verified donors."""
+    from tbank_check_service import donor_keywords_ok, _is_blocked_donor
+
+    verified = sorted(
+        p
+        for p in (_TBANK_DIR.glob("tbank_sbp_verified_*.pdf") if _TBANK_DIR.exists() else [])
+        if "_enriched" not in p.stem and donor_keywords_ok(p)
+    )
+    if verified:
+        import random as _random
+        return _random.choice(verified)
+    enriched = sorted(
+        p
+        for p in (_TBANK_DIR.glob("*_enriched.pdf") if _TBANK_DIR.exists() else [])
+        if not _is_blocked_donor(p) and donor_keywords_ok(p)
+    )
     if enriched:
         import random as _random
         return _random.choice(enriched)
-    fallback = _TBANK_DIR / "receipt_sbp_1.pdf"
+    fallback = _TBANK_DIR / "tbank_sbp_verified_12052026.pdf"
     return fallback
 
 
@@ -80,8 +94,8 @@ TEMPLATES = {
 
 SBP_FIELDS = [
     {"key": "datetime",     "label": "Дата и время",         "y": 432.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left",  "tol_x": 8.0},
-    # tol_x=28: в части чеков (например receipt_13.11.2025) жирная сумма левее эталона (~196 vs 217).
-    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 412.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    # tol_x=50: amount can shift left significantly for long amounts (e.g. '11 300 ' from '1 200 ' donor)
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 412.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 50},
     {"key": "type_label",   "label": "Тип перевода",         "y": 376.78, "x": 172.28, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
     {"key": "status",       "label": "Статус",               "y": 356.78, "x": 216.57, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
     {"key": "amount_small", "label": "Сумма",                "y": 336.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
@@ -97,7 +111,7 @@ SBP_FIELDS = [
 # Компактный вариант (нет банка/счёта/идентификатора): дата Y=364.54, Итого Y=344.39
 SBP_SHORT_FIELDS = [
     {"key": "datetime",     "label": "Дата и время",         "y": 364.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left",  "tol_x": 8.0},
-    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 344.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 344.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 50},
     {"key": "type_label",   "label": "Тип перевода",         "y": 308.78, "x": 172.28, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
     {"key": "status",       "label": "Статус",               "y": 288.78, "x": 216.57, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
     {"key": "amount_small", "label": "Сумма",                "y": 268.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
@@ -110,7 +124,7 @@ SBP_SHORT_FIELDS = [
 # Длинный вариант (+банк получателя, +счёт, +идентификатор): дата Y=454.54, Итого Y=434.39
 SBP_LONG_FIELDS = [
     {"key": "datetime",     "label": "Дата и время",         "y": 454.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left",  "tol_x": 8.0},
-    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 434.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 434.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 50},
     {"key": "type_label",   "label": "Тип перевода",         "y": 398.78, "x": 172.28, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
     {"key": "status",       "label": "Статус",               "y": 378.78, "x": 216.57, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
     {"key": "amount_small", "label": "Сумма",                "y": 358.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
@@ -125,7 +139,7 @@ SBP_LONG_FIELDS = [
 
 CARD_FIELDS = [
     {"key": "datetime",     "label": "Дата и время",         "y": 324.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left"},
-    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 304.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 304.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 50},
     {"key": "status",       "label": "Статус",               "y": 248.78, "x": 216.57, "font": "F1", "size": 9,  "align": "right"},
     {"key": "amount_small", "label": "Сумма",                "y": 228.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
     {"key": "sender",       "label": "Отправитель",          "y": 207.78, "x": 188.54, "font": "F1", "size": 9,  "align": "right"},
@@ -134,7 +148,7 @@ CARD_FIELDS = [
 
 TRANSGRAN_FIELDS = [
     {"key": "datetime",     "label": "Дата и время",         "y": 404.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left"},
-    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 384.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 384.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 50},
     {"key": "status",       "label": "Статус",               "y": 328.78, "x": 204.07, "font": "F1", "size": 9,  "align": "right"},
     {"key": "amount_small", "label": "Сумма",                "y": 308.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
     {"key": "commission",   "label": "Комиссия",             "y": 287.78, "x": 198.1,  "font": "F1", "size": 9,  "align": "right"},
@@ -293,17 +307,36 @@ def _recompress_zero_delta(
     # Strip existing trailing whitespace — we'll add minimal padding ourselves
     new_decompressed = new_decompressed.rstrip(b"\n\r \t") + b"\n"
 
-    _STRATEGIES = (
-        zlib.Z_DEFAULT_STRATEGY,
-        zlib.Z_FILTERED,
-        zlib.Z_HUFFMAN_ONLY,
-        zlib.Z_RLE,
-        zlib.Z_FIXED,
-    )
+    # Genuine T-Bank JasperReports PDFs always use zlib level 6, header 789c.
+    # We MUST match this — external integrity checkers verify the zlib header.
+    # Strategy: try ONLY level 6 first with increasing padding, then other levels
+    # only as a last resort.
 
-    def _try_compress(data: bytes) -> bytes | None:
-        for level in (6, 7, 8, 9, 5, 4, 3, 2, 1):
-            for strategy in _STRATEGIES:
+    def _try_level6(data: bytes) -> bytes | None:
+        """Try all zlib strategies at level 6 only (header 789c)."""
+        for strategy in (
+            zlib.Z_DEFAULT_STRATEGY,
+            zlib.Z_FILTERED,
+            zlib.Z_RLE,
+            zlib.Z_FIXED,
+        ):
+            for mem in (8, 9, 7, 6, 5, 4):
+                co = zlib.compressobj(6, zlib.DEFLATED, 15, mem, strategy)
+                c = co.compress(data) + co.flush()
+                if len(c) == target:
+                    return c
+        return None
+
+    def _try_any_level(data: bytes) -> bytes | None:
+        """Fallback: try all levels (including non-6)."""
+        for level in (7, 8, 9, 5, 4, 3, 2, 1):
+            for strategy in (
+                zlib.Z_DEFAULT_STRATEGY,
+                zlib.Z_FILTERED,
+                zlib.Z_HUFFMAN_ONLY,
+                zlib.Z_RLE,
+                zlib.Z_FIXED,
+            ):
                 for mem in (8, 9, 7, 6, 5, 4):
                     co = zlib.compressobj(level, zlib.DEFLATED, 15, mem, strategy)
                     c = co.compress(data) + co.flush()
@@ -311,35 +344,41 @@ def _recompress_zero_delta(
                         return c
         return None
 
-    # First try without extra padding (only the single \n we added above)
-    exact = _try_compress(new_decompressed)
-    if exact:
+    def _patch(compressed: bytes) -> bytes:
         data = bytearray(pdf_bytes)
-        data[stream_start : stream_start + old_stream_len] = exact
+        data[stream_start : stream_start + old_stream_len] = compressed
         return bytes(data)
 
-    # Try with small whitespace padding (prefer spaces over \n — less detectable)
-    # Order: 1-10 spaces, then mixed, then up to 50 chars total — stay realistic
+    # Phase 1: level 6 only, no padding
+    exact = _try_level6(new_decompressed)
+    if exact:
+        return _patch(exact)
+
+    # Phase 2: level 6 with minimal whitespace padding (spaces preferred)
     pad_chars = [b" ", b"\n", b"\t"]
-    for pad_n in range(1, 50):
+    for pad_n in range(1, 60):
         for pc in pad_chars:
-            candidate = new_decompressed + pc * pad_n
-            exact = _try_compress(candidate)
+            exact = _try_level6(new_decompressed + pc * pad_n)
             if exact:
-                data = bytearray(pdf_bytes)
-                data[stream_start : stream_start + old_stream_len] = exact
-                return bytes(data)
+                return _patch(exact)
 
-    # Last resort: large \n padding (up to 1200) — may be flagged by strict checkers
-    for pad in range(50, 1200):
-        candidate = new_decompressed + b"\n" * pad
-        exact = _try_compress(candidate)
+    # Phase 3: level 6 with larger padding (up to 1200)
+    for pad in range(60, 1200):
+        exact = _try_level6(new_decompressed + b"\n" * pad)
         if exact:
-            data = bytearray(pdf_bytes)
-            data[stream_start : stream_start + old_stream_len] = exact
-            return bytes(data)
+            return _patch(exact)
 
-    # Fallback: delta-based patching (use actual len_num_start, not 0)
+    # Phase 4: any level (last resort — zlib header will differ from 789c)
+    exact = _try_any_level(new_decompressed)
+    if exact:
+        return _patch(exact)
+    for pad_n in range(1, 60):
+        for pc in pad_chars:
+            exact = _try_any_level(new_decompressed + pc * pad_n)
+            if exact:
+                return _patch(exact)
+
+    # Fallback: delta-based patching (changes /Length, xref, startxref)
     return _recompress_and_fix(
         pdf_bytes, len_num_start, stream_start, old_stream_len, new_decompressed
     )
@@ -718,37 +757,42 @@ def _normalize_dt_str(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip())
 
 
-def donor_keywords_ok(pdf_path: str | Path) -> bool:
-    """True if donor /Keywords look like a genuine T-Bank receipt template.
+def _is_blocked_donor(pdf_path: Path) -> bool:
+    """Donors that fail external verification after patching."""
+    if pdf_path.name.startswith("receipt_sbp_"):
+        return True
+    try:
+        parsed = _parse_keywords(pdf_path.read_bytes())
+    except Exception:
+        return True
+    if not parsed:
+        return True
+    return parsed[2] == "10893"
 
-    Rejects bot-corrupted donors (suffix 991 with donor metadata date
-    23.05.2026 that no longer matches receipt content).
+
+def donor_keywords_ok(pdf_path: str | Path) -> bool:
+    """True if donor /Keywords match genuine T-Bank receipts that pass verification.
+
+    Accepted:
+      - UUID hash + suffix 10817/9686 (newer genuine receipts)
+      - md5 hash + suffix 991 (older genuine receipts, e.g. receipt_05.05.2026)
+    Rejected:
+      - suffix 10893 (receipt_sbp_* templates — always fail verification)
     """
     pdf_path = Path(pdf_path)
+    if _is_blocked_donor(pdf_path):
+        return False
     raw = pdf_path.read_bytes()
     parsed = _parse_keywords(raw)
     if not parsed:
         return False
 
-    kw_ts, hash_part, suffix = parsed
-    if suffix == "991":
-        return False
-
-    if "-" in hash_part:
-        return suffix in ("10817", "9686", "10893")
-
-    try:
-        receipt_type = detect_receipt_type(pdf_path)
-        content_dt = extract_fields(pdf_path, receipt_type).get("datetime", "")
-    except Exception:
-        content_dt = ""
-
-    if not content_dt:
-        return suffix != "991"
-
-    kw_date = _normalize_dt_str(kw_ts).split()[0]
-    content_date = _normalize_dt_str(content_dt).split()[0]
-    return kw_date == content_date
+    _kw_ts, hash_part, suffix = parsed
+    if "-" in hash_part and suffix in ("10817", "9686"):
+        return True
+    if "-" not in hash_part and suffix == "991":
+        return True
+    return False
 
 
 def _update_keywords(pdf_bytes: bytes, dt: Optional[datetime] = None) -> bytes:
