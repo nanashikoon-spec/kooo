@@ -264,28 +264,37 @@ def _find_donor(
                     best_partial = (missing_count, d)
                 continue
 
-        # F1 coverage OK — F2 digit glyphs: skip enrich when preserving integrity
-        # (font stream injection breaks external integrity checks).
-        if not preserve_integrity:
-            f2_chars = _renderable_f2_chars_for(d)
-            if f2_chars is not None and not _DIGIT_CODEPOINTS.issubset(f2_chars):
-                if "_enriched" not in d.stem:
-                    enriched_candidate = d.with_stem(d.stem + "_enriched")
-                    if enriched_candidate in all_donors_set:
-                        d = enriched_candidate
-                    else:
-                        try:
-                            from tbank_enrich_donor import enrich_pdf
+        # F1 coverage OK — now check F2 (bold/medium) digit coverage.
+        # Build set of digits actually needed for the bold amount.
+        needed_digits: set[int] = set()
+        if text_fields:
+            for key in ("amount_bold", "amount_small"):
+                for ch in str(text_fields.get(key, "")):
+                    if ch.isdigit():
+                        needed_digits.add(ord(ch))
 
-                            if enrich_pdf(d, enriched_candidate):
-                                d = enriched_candidate
-                                all_donors_set.add(enriched_candidate.resolve())
-                            else:
-                                continue
-                        except Exception:
-                            continue
+        f2_chars = _renderable_f2_chars_for(d)
+        if f2_chars is not None and needed_digits and not needed_digits.issubset(f2_chars):
+            # F2 lacks some needed digits → swap to enriched donor.
+            # Even in preserve_integrity mode we MUST enrich, otherwise digits
+            # render as invisible gaps (e.g. "11 300" → "11   00").
+            if "_enriched" not in d.stem:
+                enriched_candidate = d.with_stem(d.stem + "_enriched")
+                if enriched_candidate.exists() or enriched_candidate in all_donors_set:
+                    d = enriched_candidate
                 else:
-                    continue
+                    try:
+                        from tbank_enrich_donor import enrich_pdf
+
+                        if enrich_pdf(d, enriched_candidate):
+                            d = enriched_candidate
+                            all_donors_set.add(enriched_candidate.resolve())
+                        else:
+                            continue
+                    except Exception:
+                        continue
+            else:
+                continue
 
         if "_enriched" in d.stem:
             eligible_enriched.append(d)
