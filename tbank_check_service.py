@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import uuid
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -702,6 +703,54 @@ def _replace_all_fields_in_stream(
 
 # ── Metadata helpers (same-length padding, like VTB) ──────────────────
 
+def _parse_keywords(pdf_bytes: bytes) -> tuple[str, str, str] | None:
+    """Return (timestamp, hash, suffix) from /Keywords, or None."""
+    kw_m = re.search(rb"/Keywords\(([^)]+)\)", pdf_bytes)
+    if not kw_m:
+        return None
+    parts = kw_m.group(1).decode("latin-1").strip().split(" | ")
+    if len(parts) < 3:
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+def _normalize_dt_str(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip())
+
+
+def donor_keywords_ok(pdf_path: str | Path) -> bool:
+    """True if donor /Keywords look like a genuine T-Bank receipt template.
+
+    Rejects bot-corrupted donors (suffix 991 with donor metadata date
+    23.05.2026 that no longer matches receipt content).
+    """
+    pdf_path = Path(pdf_path)
+    raw = pdf_path.read_bytes()
+    parsed = _parse_keywords(raw)
+    if not parsed:
+        return False
+
+    kw_ts, hash_part, suffix = parsed
+    if suffix == "991":
+        return False
+
+    if "-" in hash_part:
+        return suffix in ("10817", "9686", "10893")
+
+    try:
+        receipt_type = detect_receipt_type(pdf_path)
+        content_dt = extract_fields(pdf_path, receipt_type).get("datetime", "")
+    except Exception:
+        content_dt = ""
+
+    if not content_dt:
+        return suffix != "991"
+
+    kw_date = _normalize_dt_str(kw_ts).split()[0]
+    content_date = _normalize_dt_str(content_dt).split()[0]
+    return kw_date == content_date
+
+
 def _update_keywords(pdf_bytes: bytes, dt: Optional[datetime] = None) -> bytes:
     """Update /Keywords with new timestamp and hash, preserving byte length."""
     dt = dt or datetime.now()
@@ -714,7 +763,10 @@ def _update_keywords(pdf_bytes: bytes, dt: Optional[datetime] = None) -> bytes:
     parts = old_kw.split(" | ")
     if len(parts) >= 3:
         ts = dt.strftime("%d.%m.%Y %H:%M:%S")
-        new_hash = hashlib.md5(f"{ts}_{parts[2]}".encode()).hexdigest()
+        if "-" in parts[1]:
+            new_hash = str(uuid.uuid4())
+        else:
+            new_hash = hashlib.md5(f"{ts}_{parts[2]}".encode()).hexdigest()
         new_kw = f"{ts} | {new_hash} | {parts[2]}"
         new_kw_bytes = new_kw.encode("latin-1")
         padded = new_kw_bytes[: len(old_kw_bytes)].ljust(len(old_kw_bytes))

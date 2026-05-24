@@ -61,12 +61,78 @@ def _renderable_f2_chars_for(donor_path: Path) -> set[int] | None:
 
 
 def _all_donors() -> list[Path]:
-    """All available T-Bank donor PDFs (fresh ones first, enriched last)."""
-    fresh = sorted(TBANK_DIR.glob("tbank_sbp_*.pdf"))
+    """All available T-Bank donor PDFs (verified first, enriched last)."""
+    verified = sorted(
+        p for p in TBANK_DIR.glob("tbank_sbp_verified_*.pdf")
+        if "_enriched" not in p.stem
+    )
+    fresh = sorted(
+        p for p in TBANK_DIR.glob("tbank_sbp_*.pdf")
+        if not p.name.startswith("tbank_sbp_verified_")
+    )
     enriched = sorted(TBANK_DIR.glob("*_enriched.pdf"))
-    legacy = [p for p in sorted(TBANK_DIR.glob("*.pdf"))
-              if not p.name.startswith("tbank_sbp_") and "_enriched" not in p.stem]
-    return fresh + enriched + legacy
+    legacy = [
+        p for p in sorted(TBANK_DIR.glob("*.pdf"))
+        if not p.name.startswith("tbank_sbp_") and "_enriched" not in p.stem
+    ]
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for group in (verified, fresh, enriched, legacy):
+        for p in group:
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            ordered.append(p)
+    return ordered
+
+
+def _resolve_donor_path(donor_path: Path) -> Path:
+    """Prefer enriched donor variant so F2 digits render in amount_bold."""
+    if "_enriched" in donor_path.stem:
+        return donor_path
+
+    enriched_path = donor_path.with_stem(donor_path.stem + "_enriched")
+    if enriched_path.exists():
+        return enriched_path
+
+    try:
+        from tbank_enrich_donor import enrich_pdf
+
+        if enrich_pdf(donor_path, enriched_path):
+            return enriched_path
+    except Exception:
+        pass
+
+    return donor_path
+
+
+def _verified_donors(candidates: list[Path]) -> list[Path]:
+    """Keep only donors whose /Keywords metadata is safe for verification."""
+    from tbank_check_service import donor_keywords_ok
+
+    verified = [p for p in candidates if donor_keywords_ok(p)]
+    return verified
+
+
+def _donor_priority(d: Path) -> tuple[int, str]:
+    """Lower tuple sorts earlier: verified UUID donors win."""
+    from tbank_check_service import _parse_keywords
+
+    score = 2
+    try:
+        parsed = _parse_keywords(d.read_bytes())
+        if parsed:
+            _, hash_part, suffix = parsed
+            if "-" in hash_part and suffix in ("10817", "9686"):
+                score = 0
+            elif suffix != "991":
+                score = 1
+    except Exception:
+        pass
+    if d.name.startswith("tbank_sbp_verified_"):
+        score = min(score, 0)
+    return score, d.name
 
 
 def _find_donor(
@@ -103,6 +169,10 @@ def _find_donor(
             "Положите файлы в папку TBANK/ проекта."
         )
 
+    verified = _verified_donors(all_donors)
+    if verified:
+        all_donors = verified
+
     # Filter out SBP_SHORT donors when full layout is required
     if require_full_sbp:
         full_donors = [d for d in all_donors if _donor_type(d) in _FULL_SBP_TYPES]
@@ -117,14 +187,14 @@ def _find_donor(
                     needed.add(ord(ch))
 
     if not needed:
-        fresh = [p for p in all_donors if p.name.startswith("tbank_sbp_")]
-        if fresh and not prefer_enriched:
-            return random.choice(fresh)
+        pool = sorted(all_donors, key=_donor_priority)
         if prefer_enriched:
-            enr = [p for p in all_donors if "_enriched" in p.stem]
+            enr = [p for p in pool if "_enriched" in p.stem]
             if enr:
                 return random.choice(enr)
-        return random.choice(all_donors)
+        top_score = _donor_priority(pool[0])[0]
+        best = [p for p in pool if _donor_priority(p)[0] == top_score]
+        return random.choice(best)
 
     eligible_fresh: list[Path] = []
     eligible_enriched: list[Path] = []
@@ -165,12 +235,23 @@ def _find_donor(
         else:
             eligible_legacy.append(d)
 
-    if eligible_fresh:
-        return random.choice(eligible_fresh)
-    if eligible_enriched:
-        return random.choice(eligible_enriched)
-    if eligible_legacy:
-        return random.choice(eligible_legacy)
+    if eligible_fresh or eligible_enriched or eligible_legacy:
+        pool = eligible_fresh + eligible_enriched + eligible_legacy
+        top_score = min(_donor_priority(p)[0] for p in pool)
+        best = [p for p in pool if _donor_priority(p)[0] == top_score]
+        if eligible_fresh:
+            fresh_best = [p for p in best if p.name.startswith("tbank_sbp_")]
+            if fresh_best:
+                return random.choice(fresh_best)
+        if eligible_enriched:
+            enr_best = [p for p in best if "_enriched" in p.stem]
+            if enr_best:
+                return random.choice(enr_best)
+        if eligible_legacy:
+            legacy_best = [p for p in best if p not in eligible_fresh and p not in eligible_enriched]
+            if legacy_best:
+                return random.choice(legacy_best)
+        return random.choice(best)
     if best_partial is not None:
         return best_partial[1]
     return random.choice(all_donors)
@@ -286,20 +367,18 @@ def generate_tbank_receipt(
     if donor_path is None:
         donor_path = _find_donor(text_fields=changes)
 
+    donor_path = _resolve_donor_path(donor_path)
+
     receipt_type = detect_receipt_type(donor_path)
 
     pdf_bytes = patch_all_fields(donor_path, changes, receipt_type)
 
-    # Update metadata.
-    # NOTE: _update_keywords is intentionally NOT called here.
-    # The donor's /Keywords field contains a server-side md5 that cannot be
-    # reproduced. Changing it (even with an updated timestamp) produces a
-    # wrong hash that causes "Целостность PDF: Нет" in the verifier.
-    # Keeping the original Keywords from the donor passes the integrity check.
+    # Update metadata to match the generated receipt datetime.
     try:
         dt = datetime.strptime(f"{operation_date} {operation_time}", "%d.%m.%Y %H:%M:%S")
     except ValueError:
         dt = datetime.now()
+    pdf_bytes = _update_keywords(pdf_bytes, dt)
     pdf_bytes = _update_dates(pdf_bytes, dt)
     pdf_bytes = _update_doc_id(pdf_bytes)
 
