@@ -5,6 +5,7 @@
 # Обход: прокси и SSL (корпоративные сети / Python на macOS)
 import os as _os
 import ssl
+import sys
 import urllib.request as _ur
 from urllib.parse import urlparse
 _ssl_ctx = ssl._create_unverified_context()
@@ -49,6 +50,9 @@ except OSError:
 
 # Persistent offset — prevents replay of processed updates after restart
 _OFFSET_FILE = _PERSISTENT_DIR / "bot_offset.txt"
+# In-memory dedup: skip update_ids already handled (protects against replay/overlap).
+_SEEN_UPDATE_IDS: set[int] = set()
+_MAX_SEEN_UPDATE_IDS = 2000
 
 
 def _load_offset() -> int:
@@ -63,6 +67,18 @@ def _save_offset(offset: int) -> None:
         _OFFSET_FILE.write_text(str(offset))
     except Exception:
         pass
+
+
+def _already_handled_update(update_id: int) -> bool:
+    """Return True if this update_id was already processed in this process."""
+    if update_id in _SEEN_UPDATE_IDS:
+        return True
+    _SEEN_UPDATE_IDS.add(update_id)
+    if len(_SEEN_UPDATE_IDS) > _MAX_SEEN_UPDATE_IDS:
+        drop = sorted(_SEEN_UPDATE_IDS)[: _MAX_SEEN_UPDATE_IDS // 2]
+        for uid in drop:
+            _SEEN_UPDATE_IDS.discard(uid)
+    return False
 
 
 # Загрузка .env вручную (без python-dotenv)
@@ -4670,6 +4686,9 @@ def run_bot(token: str) -> None:
                         tg_request(token, "deleteWebhook", {"drop_pending_updates": False})
                     except Exception:
                         pass
+            elif e.code == 409:
+                print("❌ Conflict 409: другой экземпляр бота уже запущен. Выход.")
+                sys.exit(0)
             else:
                 print(f"Ошибка getUpdates HTTP {e.code}: {err_msg[:80]}")
             time.sleep(5)
@@ -4685,8 +4704,11 @@ def run_bot(token: str) -> None:
             continue
 
         for upd in r.get("result", []):
-            offset = upd["update_id"] + 1
+            update_id = upd["update_id"]
+            offset = update_id + 1
             _save_offset(offset)
+            if _already_handled_update(update_id):
+                continue
             try:
 
                 if "message" in upd:
