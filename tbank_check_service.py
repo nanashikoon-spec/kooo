@@ -354,31 +354,30 @@ def _recompress_zero_delta(
     if exact:
         return _patch(exact)
 
-    # Phase 2: level 6 with minimal whitespace padding (spaces preferred)
-    pad_chars = [b" ", b"\n", b"\t"]
-    for pad_n in range(1, 60):
-        for pc in pad_chars:
+    # Phase 2: level 6 with minimal padding (up to MAX_SAFE_PAD bytes).
+    # Genuine T-Bank receipts end with exactly 1 trailing '\n'. Any padding
+    # we add is detectable — so we cap at MAX_SAFE_PAD and bail out rather
+    # than producing a receipt with hundreds of visible trailing newlines.
+    MAX_SAFE_PAD = 8
+    for pad_n in range(1, MAX_SAFE_PAD + 1):
+        for pc in (b"\n", b" "):
             exact = _try_level6(new_decompressed + pc * pad_n)
             if exact:
                 return _patch(exact)
 
-    # Phase 3: level 6 with larger padding (up to 1200)
-    for pad in range(60, 1200):
-        exact = _try_level6(new_decompressed + b"\n" * pad)
-        if exact:
-            return _patch(exact)
-
-    # Phase 4: any level (last resort — zlib header will differ from 789c)
+    # Phase 3: any level (still minimal padding ≤ MAX_SAFE_PAD)
+    # This keeps the decompressed content clean even if zlib header differs.
     exact = _try_any_level(new_decompressed)
     if exact:
         return _patch(exact)
-    for pad_n in range(1, 60):
-        for pc in pad_chars:
+    for pad_n in range(1, MAX_SAFE_PAD + 1):
+        for pc in (b"\n", b" "):
             exact = _try_any_level(new_decompressed + pc * pad_n)
             if exact:
                 return _patch(exact)
 
-    # Fallback: delta-based patching (changes /Length, xref, startxref)
+    # Fallback: delta-based patching (changes /Length, xref, startxref).
+    # Preferable to large padding that reveals tampering.
     return _recompress_and_fix(
         pdf_bytes, len_num_start, stream_start, old_stream_len, new_decompressed
     )

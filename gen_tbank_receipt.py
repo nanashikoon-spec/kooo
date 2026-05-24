@@ -149,6 +149,39 @@ def _donor_priority(d: Path) -> tuple[int, str]:
     return score, d.name
 
 
+def _probe_padding(donor_path: Path, changes: dict[str, str]) -> int:
+    """Return estimated padding bytes needed for zero-delta level-6 recompression.
+
+    0 = perfect fit (no padding), low = good donor, high = donor will need
+    large padding and likely fail external integrity checks.
+    Returns 9999 on error.
+    """
+    import zlib
+    try:
+        from tbank_check_service import (
+            patch_all_fields, detect_receipt_type, _find_page_stream,
+        )
+        rt = detect_receipt_type(donor_path)
+        pdf = patch_all_fields(donor_path, changes, rt)
+        _, st, slen, dec = _find_page_stream(pdf)
+        target = slen
+        base = dec.rstrip(b"\n\r \t") + b"\n"
+        for pad_n in range(0, 9):
+            for pc in (b"\n", b" "):
+                data = base if pad_n == 0 else base + pc * pad_n
+                for strategy in (zlib.Z_DEFAULT_STRATEGY, zlib.Z_FILTERED, zlib.Z_RLE):
+                    for mem in (8, 9, 7):
+                        co = zlib.compressobj(6, zlib.DEFLATED, 15, mem, strategy)
+                        c = co.compress(data) + co.flush()
+                        if len(c) == target:
+                            return pad_n
+                if pad_n == 0:
+                    break
+        return 9999
+    except Exception:
+        return 9999
+
+
 def _find_donor(
     prefer_enriched: bool = False,
     text_fields: Optional[dict[str, str]] = None,
@@ -267,6 +300,14 @@ def _find_donor(
         pool = eligible_fresh + eligible_enriched + eligible_legacy
         top_score = min(_donor_priority(p)[0] for p in pool)
         best = [p for p in pool if _donor_priority(p)[0] == top_score]
+
+        # In preserve_integrity mode: pick the donor that needs the LEAST
+        # zero-delta padding (large padding leaves detectable trailing bytes).
+        if preserve_integrity and text_fields and len(best) > 1:
+            probed = [(p, _probe_padding(p, text_fields)) for p in best]
+            min_pad = min(pad for _, pad in probed)
+            best = [p for p, pad in probed if pad == min_pad]
+
         verified_best = [p for p in best if p.name.startswith("tbank_sbp_verified_")]
         if verified_best:
             return random.choice(verified_best)

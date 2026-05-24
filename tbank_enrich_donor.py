@@ -425,13 +425,17 @@ def enrich_pdf(input_path: Path, output_path: Path) -> bool:
 
 
 def enrich_all(tbank_dir: Path = TBANK_DIR) -> list[Path]:
-    """Enrich all PDFs in tbank_dir (skip already-enriched files).
+    """Enrich all PDFs in tbank_dir (skip already-enriched and blocked donors).
 
     Returns list of output paths.
     """
+    from tbank_check_service import _is_blocked_donor, donor_keywords_ok
+
     outputs = []
     for pdf_path in sorted(tbank_dir.glob("*.pdf")):
         if "_enriched" in pdf_path.stem:
+            continue
+        if _is_blocked_donor(pdf_path) or not donor_keywords_ok(pdf_path):
             continue
         out = pdf_path.with_stem(pdf_path.stem + "_enriched")
         if out.exists():

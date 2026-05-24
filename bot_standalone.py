@@ -4004,17 +4004,12 @@ def _gen_alfa_transgran(fields: dict) -> tuple[bytes, str]:
 
 
 def _gen_tbank_sbp(fields: dict) -> tuple[bytes, str]:
-    """Сгенерировать чек Т-Банк СБП. Возвращает (pdf_bytes, filename).
+    """Сгенерировать чек Т-Бank СБП. Возвращает (pdf_bytes, filename).
 
-    Структура fields совпадает с формой `tbank_sbp` в _NEW_GEN_WIZARD_FIELDS.
-    Missing chars warning логируется, но не блокирует выдачу.
+    По умолчанию preserve_integrity=True: только content-stream патч,
+    без изменения шрифтов и метаданных — для «Целостность PDF: Да».
     """
     from gen_tbank_receipt import generate_tbank_receipt
-    try:
-        from tbank_enrich_donor import enrich_all, TBANK_DIR as _TBANK_DIR
-        enrich_all(_TBANK_DIR)  # safe every call — skips already-enriched files
-    except Exception:
-        pass
 
     amount_raw = fields.get("amount", "1000")
     amount_int = int(re.sub(r"\D", "", str(amount_raw)) or "1000")
