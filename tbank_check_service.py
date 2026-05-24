@@ -93,6 +93,35 @@ SBP_FIELDS = [
     {"key": "ident",        "label": "Идентификатор",        "y": 195.78, "x": 123.46, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
 ]
 
+# Компактный вариант (нет банка/счёта/идентификатора): дата Y=364.54, Итого Y=344.39
+SBP_SHORT_FIELDS = [
+    {"key": "datetime",     "label": "Дата и время",         "y": 364.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left",  "tol_x": 8.0},
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 344.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    {"key": "type_label",   "label": "Тип перевода",         "y": 308.78, "x": 172.28, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
+    {"key": "status",       "label": "Статус",               "y": 288.78, "x": 216.57, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
+    {"key": "amount_small", "label": "Сумма",                "y": 268.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
+    {"key": "commission",   "label": "Комиссия",             "y": 247.78, "x": 198.1,  "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
+    {"key": "sender",       "label": "Отправитель",          "y": 227.78, "x": 188.54, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "phone",        "label": "Телефон получателя",   "y": 207.78, "x": 178.72, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "receiver",     "label": "Получатель",           "y": 187.78, "x": 216.55, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+]
+
+# Длинный вариант (+банк получателя, +счёт, +идентификатор): дата Y=454.54, Итого Y=434.39
+SBP_LONG_FIELDS = [
+    {"key": "datetime",     "label": "Дата и время",         "y": 454.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left",  "tol_x": 8.0},
+    {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 434.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
+    {"key": "type_label",   "label": "Тип перевода",         "y": 398.78, "x": 172.28, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
+    {"key": "status",       "label": "Статус",               "y": 378.78, "x": 216.57, "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
+    {"key": "amount_small", "label": "Сумма",                "y": 358.78, "x": 232.76, "font": "F1", "size": 9,  "align": "right", "tol_x": 14},
+    {"key": "commission",   "label": "Комиссия",             "y": 337.78, "x": 198.1,  "font": "F1", "size": 9,  "align": "right", "tol_x": 8.0},
+    {"key": "sender",       "label": "Отправитель",          "y": 317.78, "x": 188.54, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "phone",        "label": "Телефон получателя",   "y": 297.78, "x": 178.72, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "receiver",     "label": "Получатель",           "y": 277.78, "x": 216.55, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "bank",         "label": "Банк получателя",      "y": 257.78, "x": 204.83, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "account",      "label": "Счет списания",        "y": 237.78, "x": 160.95, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+    {"key": "ident",        "label": "Идентификатор",        "y": 217.78, "x": 123.46, "font": "F1", "size": 9,  "align": "right", "tol_x": 60.0},
+]
+
 CARD_FIELDS = [
     {"key": "datetime",     "label": "Дата и время",         "y": 324.54, "x": 20.0,   "font": "F1", "size": 8,  "align": "left"},
     {"key": "amount_bold",  "label": "Сумма (жирная)",       "y": 304.39, "x": 217.3,  "font": "F2", "size": 16, "align": "right", "tol_x": 28},
@@ -151,6 +180,8 @@ for row in TRANSGRAN_SHORT_FIELDS:
 
 FIELDS_BY_TYPE = {
     "sbp": SBP_FIELDS,
+    "sbp_short": SBP_SHORT_FIELDS,
+    "sbp_long": SBP_LONG_FIELDS,
     "card": CARD_FIELDS,
     "transgran": TRANSGRAN_FIELDS,
     "transgran_shifted": TRANSGRAN_SHIFTED_FIELDS,
@@ -159,16 +190,15 @@ FIELDS_BY_TYPE = {
 }
 
 RECEIPT_TYPES = (
-    "sbp",
+    "sbp", "sbp_short", "sbp_long",
     "card",
-    "transgran",
-    "transgran_shifted",
-    "transgran_short",
-    "transgran_short_compact",
+    "transgran", "transgran_shifted", "transgran_short", "transgran_short_compact",
 )
 
 RECEIPT_TYPE_LABELS: dict[str, str] = {
     "sbp":              "По номеру телефона (СБП)",
+    "sbp_short":        "По номеру телефона (СБП)",
+    "sbp_long":         "По номеру телефона (СБП)",
     "card":             "По карте",
     "transgran":        "Трансграничный",
     "transgran_shifted": "Трансграничный",
@@ -851,8 +881,19 @@ def patch_amount_only(
     return patch_amount(pdf_path, new_amount, receipt_type, output_path)
 
 
+def _is_sbp_content(dec: bytes) -> bool:
+    """Return True if content stream looks like SBP receipt (has commission/phone fields)."""
+    for m in re.finditer(TJ_REGEX, dec):
+        raw = unescape_pdf_literal(m.group(1))
+        for font in ("regular", "medium"):
+            text = decode_text(raw, font)
+            if any(s in text for s in ("Комиссия", "Телефон", "По номеру", "Отправитель")):
+                return True
+    return False
+
+
 def detect_receipt_type(pdf_path: str | Path) -> str:
-    """Detect T-Bank receipt subtype using MediaBox height."""
+    """Detect T-Bank receipt subtype using MediaBox height + content stream."""
     data = Path(pdf_path).read_bytes()
     mb_m = re.search(
         rb"/MediaBox\s*\[\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s*\]", data
@@ -861,13 +902,22 @@ def detect_receipt_type(pdf_path: str | Path) -> str:
         height = int(mb_m.group(2))
         if height <= 420:
             return "card"
+        if height >= 540:
+            # h≥540: longer SBP with extra fields (bank, account, ident)
+            return "sbp_long"
         if height >= 510:
             return "sbp"
-        # h≈451 — короткий transgran (Y-поля сдвинуты на -40pt относительно полного)
-        # h≈431 — ещё на −20 pt ниже (см. TRANSGRAN_SHORT_COMPACT_FIELDS)
+        # h≈451 — could be SBP_SHORT or transgran_short; h≈431 → transgran_short_compact
         if height <= 460:
             if height < 441:
                 return "transgran_short_compact"
+            # Distinguish SBP_SHORT from transgran_short by content
+            try:
+                _, _, _, dec = _find_page_stream(data)
+                if _is_sbp_content(dec):
+                    return "sbp_short"
+            except Exception:
+                pass
             return "transgran_short"
         if height < 510:
             return _detect_transgran_field_layout(data)

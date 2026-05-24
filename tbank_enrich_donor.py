@@ -255,20 +255,54 @@ def _patch_font_stream(
     return bytes(data)
 
 
+def _find_w_array_bounds(pdf_data: bytes, obj_start: int, chunk: bytes) -> tuple[int, int] | None:
+    """Find the byte range of the full /W [...] array in a CIDFont object.
+
+    Returns (abs_w_start, abs_bracket_end) where abs_w_start is the position
+    of the '/W' key and abs_bracket_end is the position just after the matching ']'.
+
+    Uses proper balanced-bracket matching to handle nested sub-arrays like
+    /W [3[200]305[570 509 540]] — the naive lazy regex \\[(.*?)\\] would stop
+    at the first inner ']' and corrupt the replacement.
+    """
+    w_key_m = re.search(rb"/W\s*\[", chunk)
+    if not w_key_m:
+        return None
+
+    abs_w_start = obj_start + w_key_m.start()
+    bracket_open = obj_start + w_key_m.end() - 1  # position of the outer '['
+
+    depth = 0
+    search_limit = min(bracket_open + 2000, len(pdf_data))
+    for i in range(bracket_open, search_limit):
+        b = pdf_data[i : i + 1]
+        if b == b"[":
+            depth += 1
+        elif b == b"]":
+            depth -= 1
+            if depth == 0:
+                return abs_w_start, i + 1  # exclusive end
+
+    return None  # unmatched bracket — shouldn't happen in valid PDFs
+
+
 def _update_medium_w_array(pdf_data: bytes) -> bytes:
     """Replace F2's /W array in the CIDFont dict to include all digit widths."""
     # Find the CIDFont object with TinkoffSans-Medium and a /W array
     for m in re.finditer(rb"(\d+)\s+0\s+obj", pdf_data):
         obj_start = m.start()
         # Read enough to cover the obj dict
-        chunk = pdf_data[obj_start : obj_start + 600]
+        chunk = pdf_data[obj_start : obj_start + 800]
         if b"CIDFontType2" not in chunk:
             continue
         if b"Medium" not in chunk:
             continue
-        w_m = re.search(rb"/W\s*\[(.*?)\]", chunk, re.DOTALL)
-        if not w_m:
+
+        bounds = _find_w_array_bounds(pdf_data, obj_start, chunk)
+        if not bounds:
             continue
+
+        abs_w_start, abs_w_end = bounds
 
         # Build the new /W array content that covers all digits 305-314
         new_w_content = (
@@ -280,15 +314,11 @@ def _update_medium_w_array(pdf_data: bytes) -> bytes:
             f"{DIGIT_WIDTHS[314]}]"
         ).encode()
 
-        old_w_content = w_m.group(1)
-        if old_w_content == new_w_content:
-            return pdf_data  # already done
-
-        old_w_bytes = b"/W [" + old_w_content + b"]"
         new_w_bytes = b"/W [" + new_w_content + b"]"
 
-        abs_w_start = obj_start + w_m.start()
-        abs_w_end = obj_start + w_m.end()
+        old_w_bytes = pdf_data[abs_w_start:abs_w_end]
+        if old_w_bytes == new_w_bytes:
+            return pdf_data  # already done
 
         data = bytearray(pdf_data)
         data[abs_w_start:abs_w_end] = new_w_bytes
@@ -350,30 +380,25 @@ def enrich_pdf(input_path: Path, output_path: Path) -> bool:
     f1_font = TTFont(BytesIO(f1_bytes))
     f2_font = TTFont(BytesIO(f2_bytes))
 
-    # Find which digit GIDs are empty in F2
-    missing = [gid for gid in DIGIT_GIDS if _glyph_is_empty(f2_font, gid)]
+    # Always force-copy ALL digit glyphs from F1 to F2.
+    #
+    # Why force-copy instead of checking _glyph_is_empty first:
+    # PDF font subsets often contain "ghost" digit GIDs — glyphs that have
+    # numberOfContours != 0 (so _glyph_is_empty returns False) but whose
+    # actual outlines are zero-area placeholders that render as invisible.
+    # Checking emptiness alone is not reliable; always copying ensures F2
+    # gets proper renderable digit outlines from F1.
+    print(f"[INFO] {input_path.name}: Force-copying all digit GIDs from F1 → F2")
 
-    if not missing:
-        print(f"[OK] {input_path.name}: F2 already has all digit glyphs")
-        f1_font.close()
-        f2_font.close()
-        # Still write the output (update /W)
-        pdf_data = _update_medium_w_array(pdf_data)
-        output_path.write_bytes(pdf_data)
-        return True
-
-    print(f"[INFO] {input_path.name}: F2 missing digit GIDs {missing} — injecting from F1")
-
-    # Copy glyphs from F1 to F2
     copied = []
-    for gid in missing:
+    for gid in DIGIT_GIDS:
         if _copy_glyph_at_gid(f1_font, f2_font, gid):
             copied.append(gid)
         else:
-            print(f"  [WARN] Could not copy GID {gid} (empty in F1?)")
+            print(f"  [WARN] Could not copy GID {gid} from F1")
 
     if not copied:
-        print(f"[ERROR] No glyphs copied — F1 source may be empty")
+        print(f"[ERROR] No digit glyphs copied — F1 source may be empty")
         f1_font.close()
         f2_font.close()
         return False
@@ -409,6 +434,9 @@ def enrich_all(tbank_dir: Path = TBANK_DIR) -> list[Path]:
         if "_enriched" in pdf_path.stem:
             continue
         out = pdf_path.with_stem(pdf_path.stem + "_enriched")
+        if out.exists():
+            outputs.append(out)
+            continue
         if enrich_pdf(pdf_path, out):
             outputs.append(out)
     return outputs

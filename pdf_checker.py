@@ -28,6 +28,14 @@ EXPECTED_PRODUCER = b"Oracle BI Publisher 12.2.1.4.0"
 EXPECTED_OBJECT_COUNT = 16
 EXPECTED_XREF_HEADER = b"0 17"
 EXPECTED_TJ_COUNT = 38
+# Per receipt-type Tj counts: 3 header + 3 title + N_left×3 + 2 bottom + N_right×3
+TJ_COUNT_BY_TYPE: dict[str, int] = {
+    "sbp":       38,  # 5L + 5R
+    "transgran": 35,  # 5L + 4R
+    "alfa":      32,  # 4L + 4R
+    "card":      32,  # 4L + 4R
+    "mobile":    32,  # 4L + 4R
+}
 ZLIB_LEVEL6_HEADER = bytes([0x78, 0x9C])
 TTF_MAGIC = b"\x00\x01\x00\x00"
 
@@ -391,10 +399,11 @@ def check_content(
 
     # Tj count
     tjs = re.findall(rb"<([0-9A-Fa-f]+)>\s*Tj", content_dec)
-    if len(tjs) == EXPECTED_TJ_COUNT:
-        r.ok(f"Tj count = {EXPECTED_TJ_COUNT}")
+    expected_count = TJ_COUNT_BY_TYPE.get(receipt_type, EXPECTED_TJ_COUNT)
+    if len(tjs) == expected_count:
+        r.ok(f"Tj count = {expected_count}")
     else:
-        r.fail(f"Tj count = {len(tjs)}, expected {EXPECTED_TJ_COUNT}")
+        r.fail(f"Tj count = {len(tjs)}, expected {expected_count}")
 
     # Tm coordinate ranges
     tms = re.findall(rb"1 0 0 1 ([\d.]+) ([\d.]+) Tm", content_dec)
@@ -662,6 +671,69 @@ def check_logic_transgran(
         r.warn("No TJS currency found (transgran)")
 
 
+def check_logic_generic(
+    streams: list[dict], cmap: Optional[dict], r: CheckResult, receipt_type: str
+):
+    """Generic logic checks for alfa/card/mobile receipt types (4L+4R layout).
+
+    Validates the amount field at Tj[8] and checks that the title matches the
+    expected type keyword.  Field-position checks beyond Tj[8] are skipped
+    because each type has a different field layout.
+    """
+    if not cmap or len(streams) < 4:
+        return
+    content_dec = streams[3].get("decompressed")
+    if content_dec is None:
+        return
+
+    cid_to_chr = {cid: chr(uni) for cid, uni in cmap.items()}
+    tjs = re.findall(rb"<([0-9A-Fa-f]+)>\s*Tj", content_dec)
+    decoded: list[str] = []
+    for tj_hex in tjs:
+        hex_str = tj_hex.decode()
+        chars = []
+        for i in range(0, len(hex_str), 4):
+            cid = int(hex_str[i: i + 4], 16)
+            chars.append(cid_to_chr.get(cid, "?"))
+        decoded.append("".join(chars))
+
+    def _raw(idx: int) -> str:
+        return decoded[idx] if idx < len(decoded) else ""
+
+    def _clean(idx: int) -> str:
+        return _raw(idx).replace("\xa0", " ").strip()
+
+    # Amount at Tj[8] (same position for all 4L+ receipt types)
+    amount_raw = _raw(8)
+    amount_clean = _clean(8)
+    if "RUR" in amount_clean or "RUB" in amount_clean:
+        r.ok(f"Amount field found: {amount_clean}")
+    else:
+        for line in decoded:
+            stripped = line.replace("\xa0", " ").strip()
+            if "RUR" in stripped or "RUB" in stripped:
+                amount_raw = line
+                r.warn(f"Amount not at Tj[8]; found elsewhere: {stripped}")
+                break
+        else:
+            r.warn("No RUR/RUB amount line found in decoded text")
+
+    if amount_raw.endswith("\xa0"):
+        r.ok(f"Amount ({receipt_type}) ends with NBSP (genuine pattern)")
+    else:
+        r.fail(
+            f"Amount does NOT end with NBSP: {repr(amount_raw[-5:])}"
+            " -- genuine Oracle PDFs always have trailing NBSP after amount"
+        )
+
+    # Title at Tj[4] — check it's non-empty
+    title_clean = _clean(4)
+    if title_clean:
+        r.ok(f"Title ({receipt_type}) at Tj[4]: {title_clean[:40]}")
+    else:
+        r.warn(f"Title at Tj[4] is empty for {receipt_type}")
+
+
 def check_filename_formed(
     pdf_path: Path,
     streams: list[dict],
@@ -782,10 +854,7 @@ def validate_pdf(
     # CMap
     cmap = check_cmap(streams, r)
 
-    # Content
-    check_content(streams, cmap, r, receipt_type)
-
-    # Auto-detect receipt type
+    # Auto-detect receipt type (before content check so correct Tj count is used)
     if receipt_type == "auto" and cmap and len(streams) >= 4:
         content_dec = streams[3].get("decompressed")
         if content_dec:
@@ -797,16 +866,29 @@ def validate_pdf(
                 for i in range(0, len(hex_str), 4):
                     cid = int(hex_str[i: i + 4], 16)
                     full_text += cid_to_chr.get(cid, "?")
-            if "TJS" in full_text or "C82" in full_text:
+            if "TJS" in full_text or "C82" in full_text or "рубеж" in full_text:
                 receipt_type = "transgran"
+            elif "карт" in full_text.lower() and "авторизации" in full_text.lower():
+                receipt_type = "card"
+            elif "мобильной" in full_text.lower() or "билайн" in full_text.lower() or "МТС" in full_text:
+                receipt_type = "mobile"
+            elif "клиенту" in full_text.lower() and "Альфа" in full_text:
+                receipt_type = "alfa"
             else:
                 receipt_type = "sbp"
+        if receipt_type == "auto":
+            receipt_type = "sbp"
+
+    # Content
+    check_content(streams, cmap, r, receipt_type)
 
     # Logic
     if receipt_type == "sbp":
         check_logic_sbp(streams, cmap, r)
     elif receipt_type == "transgran":
         check_logic_transgran(streams, cmap, r)
+    elif receipt_type in ("alfa", "card", "mobile"):
+        check_logic_generic(streams, cmap, r, receipt_type)
 
     # Filename timing correlation
     check_filename_formed(pdf_path, streams, cmap, r)

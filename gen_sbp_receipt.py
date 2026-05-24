@@ -812,6 +812,11 @@ def generate_sbp_receipt(
     if operation_time in ("auto", "", None):
         now_msk = datetime.now(timezone.utc) + _MSK
         operation_time = now_msk.strftime("%H:%M:%S")
+    else:
+        # Normalize single-digit hours: "1:13:23" → "01:13:23"
+        _tp = operation_time.split(":")
+        if len(_tp) >= 2:
+            operation_time = f"{int(_tp[0]):02d}:{_tp[1]}" + (f":{_tp[2]}" if len(_tp) >= 3 else ":00")
 
     # --- Align date/time to an injected SBP ID ---
     # A real Alfa-Bank SBP ID encodes the transaction instant to the second
@@ -1098,7 +1103,11 @@ def generate_sbp_receipt(
 
     if _text:
         _sem_errors: list[str] = []
-        _m_dt = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2}:\d{2})\s*мск", _text)
+        # Prefer the transaction datetime ("перевода") over the formed datetime ("формирования")
+        # to avoid the case where _fmt_formed crosses UTC midnight due to formed_offset.
+        _m_dt = re.search(r"перевода[^\d]{0,30}(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2}:\d{2})\s*мск", _text)
+        if not _m_dt:
+            _m_dt = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2}:\d{2})\s*мск", _text)
         _m_op = re.search(r"C16\d{13}\b", _text)
         _m_sbp = re.search(r"\b[AB]\d{2}[A-Z0-9]{29}\b", _text)
 
@@ -1126,10 +1135,14 @@ def generate_sbp_receipt(
                         f"(= UTC {_utc_dt.hour:02d}:{_utc_dt.minute:02d}:{_utc_dt.second:02d})"
                     )
                 _sbp_doy_mod = int(_sbp[3:5])
-                _doc_doy = _msk_dt.timetuple().tm_yday
-                if _sbp_doy_mod != _doc_doy % 100:
+                _doc_doy = _utc_dt.timetuple().tm_yday  # SBP ID encodes UTC day
+                _doc_doy_mod = _doc_doy % 100
+                # Allow ±1 day: MSK = UTC+3, so times 00:00-02:59 MSK are UTC previous day.
+                # A real SBP ID from UTC day N is valid on MSK day N+1 morning.
+                _allowed_doy_mods = (_doc_doy_mod, (_doc_doy - 1) % 100)
+                if _sbp_doy_mod not in _allowed_doy_mods:
                     _sem_errors.append(
-                        f"SBP ID day-of-year mod100={_sbp_doy_mod} ≠ receipt doy mod100={_doc_doy % 100}"
+                        f"SBP ID day-of-year mod100={_sbp_doy_mod} ≠ receipt doy mod100={_doc_doy_mod}"
                     )
             except ValueError:
                 pass

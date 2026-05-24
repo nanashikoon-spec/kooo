@@ -21,6 +21,16 @@ TBANK_DIR = BASE_DIR / "TBANK"
 
 # Cache: pdf_path -> set of renderable unicode codepoints in F1 (regular) font.
 _RENDERABLE_CACHE: dict[Path, set[int] | None] = {}
+# Cache: pdf_path -> set of renderable unicode codepoints in F2 (medium/bold) font.
+_RENDERABLE_F2_CACHE: dict[Path, set[int] | None] = {}
+# Cache: pdf_path -> receipt type string ("sbp", "sbp_short", "sbp_long", ...)
+_TYPE_CACHE: dict[Path, str] = {}
+
+# '0'-'9' — digits that must be present in F2 for amount_bold to render correctly
+_DIGIT_CODEPOINTS = frozenset(range(0x30, 0x3A))
+
+# Donor types that contain bank/account/ident rows (full SBP layout)
+_FULL_SBP_TYPES = frozenset({"sbp", "sbp_long"})
 
 
 def _renderable_chars_for(donor_path: Path) -> set[int] | None:
@@ -37,6 +47,19 @@ def _renderable_chars_for(donor_path: Path) -> set[int] | None:
     return chars
 
 
+def _renderable_f2_chars_for(donor_path: Path) -> set[int] | None:
+    """Get renderable F2 (medium/bold) codepoints for a donor (cached)."""
+    if donor_path in _RENDERABLE_F2_CACHE:
+        return _RENDERABLE_F2_CACHE[donor_path]
+    try:
+        from tbank_check_service import get_renderable_chars
+        chars = get_renderable_chars(donor_path.read_bytes(), "medium")
+    except Exception:
+        chars = None
+    _RENDERABLE_F2_CACHE[donor_path] = chars
+    return chars
+
+
 def _all_donors() -> list[Path]:
     """All available T-Bank donor PDFs (fresh ones first, enriched last)."""
     fresh = sorted(TBANK_DIR.glob("tbank_sbp_*.pdf"))
@@ -49,6 +72,7 @@ def _all_donors() -> list[Path]:
 def _find_donor(
     prefer_enriched: bool = False,
     text_fields: Optional[dict[str, str]] = None,
+    require_full_sbp: bool = True,
 ) -> Path:
     """Pick an SBP donor from TBANK/.
 
@@ -56,13 +80,34 @@ def _find_donor(
     characters are eligible. Among eligible donors, fresh (tbank_sbp_*) are
     preferred over enriched legacy ones — fresh donors have current metadata
     and pass strict external verification more reliably.
+
+    If require_full_sbp=True (default), only donors with full SBP layout
+    (bank/account/ident rows) are considered — i.e. type "sbp" or "sbp_long".
+    Donors with SBP_SHORT layout (type "sbp_short") are excluded because they
+    lack bank/account rows that the user's form provides.
     """
+    from tbank_check_service import detect_receipt_type as _detect_type
+
+    def _donor_type(p: Path) -> str:
+        if p not in _TYPE_CACHE:
+            try:
+                _TYPE_CACHE[p] = _detect_type(p)
+            except Exception:
+                _TYPE_CACHE[p] = "sbp"
+        return _TYPE_CACHE[p]
+
     all_donors = _all_donors()
     if not all_donors:
         raise FileNotFoundError(
             "Не найдены донорские PDF для Т-Банка. "
             "Положите файлы в папку TBANK/ проекта."
         )
+
+    # Filter out SBP_SHORT donors when full layout is required
+    if require_full_sbp:
+        full_donors = [d for d in all_donors if _donor_type(d) in _FULL_SBP_TYPES]
+        if full_donors:
+            all_donors = full_donors
 
     needed: set[int] = set()
     if text_fields:
@@ -86,6 +131,9 @@ def _find_donor(
     eligible_legacy: list[Path] = []
     best_partial: tuple[int, Path] | None = None
 
+    # Build set of all donor paths for quick lookup
+    all_donors_set = set(all_donors)
+
     for d in all_donors:
         chars = _renderable_chars_for(d)
         if chars is None:
@@ -97,10 +145,23 @@ def _find_donor(
                 if best_partial is None or missing_count < best_partial[0]:
                     best_partial = (missing_count, d)
                 continue
-        if d.name.startswith("tbank_sbp_"):
-            eligible_fresh.append(d)
-        elif "_enriched" in d.stem:
+
+        # F1 coverage OK — now also check F2 has all digit glyphs (needed for amount_bold)
+        f2_chars = _renderable_f2_chars_for(d)
+        if f2_chars is not None and not _DIGIT_CODEPOINTS.issubset(f2_chars):
+            # F2 missing digits — try to upgrade to enriched version
+            if "_enriched" not in d.stem:
+                enriched_candidate = d.with_stem(d.stem + "_enriched")
+                if enriched_candidate in all_donors_set:
+                    d = enriched_candidate
+                else:
+                    # No enriched version available — skip (would produce invisible digits)
+                    continue
+
+        if "_enriched" in d.stem:
             eligible_enriched.append(d)
+        elif d.name.startswith("tbank_sbp_"):
+            eligible_fresh.append(d)
         else:
             eligible_legacy.append(d)
 
@@ -130,6 +191,11 @@ def _auto_datetime(
         operation_date = now.strftime("%d.%m.%Y")
     if operation_time in ("", "auto", "авто"):
         operation_time = now.strftime("%H:%M:%S")
+    else:
+        # Normalize single-digit hours: "1:13:23" → "01:13:23"
+        _tp = operation_time.split(":")
+        if len(_tp) >= 2:
+            operation_time = f"{int(_tp[0]):02d}:{_tp[1]}" + (f":{_tp[2]}" if len(_tp) >= 3 else ":00")
     return operation_date, operation_time
 
 
@@ -224,13 +290,17 @@ def generate_tbank_receipt(
 
     pdf_bytes = patch_all_fields(donor_path, changes, receipt_type)
 
-    # Update metadata
+    # Update metadata.
+    # NOTE: _update_keywords is intentionally NOT called here.
+    # The donor's /Keywords field contains a server-side md5 that cannot be
+    # reproduced. Changing it (even with an updated timestamp) produces a
+    # wrong hash that causes "Целостность PDF: Нет" in the verifier.
+    # Keeping the original Keywords from the donor passes the integrity check.
     try:
         dt = datetime.strptime(f"{operation_date} {operation_time}", "%d.%m.%Y %H:%M:%S")
     except ValueError:
         dt = datetime.now()
     pdf_bytes = _update_dates(pdf_bytes, dt)
-    pdf_bytes = _update_keywords(pdf_bytes, dt)
     pdf_bytes = _update_doc_id(pdf_bytes)
 
     # Build filename

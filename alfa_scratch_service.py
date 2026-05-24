@@ -223,13 +223,16 @@ def _collect_required_chars(rtype: dict, values: dict[str, str], formed_text: st
     for text in [formed_text, formed_date, rtype["title"]]:
         for ch in text:
             chars.add(ord(ch))
-    for field_list in [rtype["left"], rtype["right"]]:
+    for is_left, field_list in ((True, rtype["left"]), (False, rtype["right"])):
         for field in field_list:
             for ch in field["label"]:
                 chars.add(ord(ch))
-            val = values.get(field["key"], "")
-            for ch in val:
+            # Use the processed value (same as _get_value) to capture RUR, NBSP, etc.
+            val_text = _get_value(values, field["key"], is_left=is_left)
+            for ch in val_text:
                 chars.add(ord(ch))
+    # Always include NBSP (used as spacer throughout)
+    chars.add(0xA0)
     chars.discard(0)
     return chars
 
@@ -527,15 +530,15 @@ def _build_cmap_stream(uni_to_cid: dict[int, str]) -> bytes:
     """Build a ToUnicode CMap stream (uncompressed) with beginbfchar entries."""
     entries = []
     for uni, cid in sorted(uni_to_cid.items(), key=lambda x: int(x[1], 16)):
-        entries.append(f"<{cid}><{uni:04X}>")
+        entries.append(f"<{cid}> <{uni:04X}>")
 
     lines = [
         "/CIDInit /ProcSet findresource begin",
         "12 dict begin",
         "begincmap",
         "/CIDSystemInfo",
-        "<< /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
-        "/CMapName /Adobe-Identity-UCS def",
+        "<< /Registry (Oracle)/Ordering(UCS)/Supplement 0 >> def",
+        "/CMapName /Oracle-Identity-UCS def",
         "/CMapType 2 def",
         "1 begincodespacerange",
         "<0000><FFFF>",
@@ -590,8 +593,8 @@ def _assemble_pdf(
 
     content_compressed = zlib.compress(content_stream_raw, 6)
     cmap_raw = _build_cmap_stream(uni_to_cid)
-    cmap_compressed = zlib.compress(cmap_raw, 9)
-    font_compressed = zlib.compress(donor["font_ttf"], 9)
+    cmap_compressed = zlib.compress(cmap_raw, 6)
+    font_compressed = zlib.compress(donor["font_ttf"], 6)
     widths_str = _build_widths(uni_to_cid, donor["widths_str"])
 
     offsets: dict[int, int] = {}
@@ -701,7 +704,6 @@ def _assemble_pdf(
     mark_obj(2)
     write(b"2 0 obj" + LF)
     write(b"<<" + LF)
-    write(b"/Type /Info" + LF)
     write(b"/Producer (Oracle BI Publisher 12.2.1.4.0)" + LF)
     write(b">>" + LF)
     write(b"endobj" + LF)
@@ -811,9 +813,7 @@ def _assemble_pdf(
 
     # ── Trailer ──
     id1 = secrets.token_hex(16)
-    id2 = secrets.token_hex(16)
-    while id1 == id2:
-        id2 = secrets.token_hex(16)
+    id2 = id1  # Oracle BI Publisher always has ID[0] == ID[1]
 
     write(b"trailer" + LF)
     write(b"<<" + LF)
@@ -825,7 +825,7 @@ def _assemble_pdf(
 
     write(b"startxref" + LF)
     write(str(xref_offset).encode() + LF)
-    write(b"%%EOF")
+    write(b"%%EOF" + LF)
 
     return bytes(buf)
 
@@ -925,6 +925,8 @@ def generate_alfa_scratch(
 
     required = _collect_required_chars(rtype, values, formed_text, formed_date)
     uni_to_cid = _extend_cmap(donor["uni_to_cid"], required)
+    # Keep ONLY the characters actually used in this receipt — no donor leftovers.
+    uni_to_cid = {cp: cid for cp, cid in uni_to_cid.items() if cp in required}
 
     content_raw = _build_content_stream(
         receipt_type, values, uni_to_cid, formed_text, formed_date

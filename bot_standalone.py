@@ -47,6 +47,24 @@ try:
 except OSError:
     _PERSISTENT_DIR = _BOT_DIR
 
+# Persistent offset — prevents replay of processed updates after restart
+_OFFSET_FILE = _PERSISTENT_DIR / "bot_offset.txt"
+
+
+def _load_offset() -> int:
+    try:
+        return int(_OFFSET_FILE.read_text().strip())
+    except Exception:
+        return 0
+
+
+def _save_offset(offset: int) -> None:
+    try:
+        _OFFSET_FILE.write_text(str(offset))
+    except Exception:
+        pass
+
+
 # Загрузка .env вручную (без python-dotenv)
 try:
     env_path = Path(os.environ.get("BOT_ENV_FILE", str(Path(__file__).parent / ".env")))
@@ -141,6 +159,15 @@ def _next_alfa_op_id(operation_date: str, operation_time: str = "12:00:00") -> s
     last_seq = state.get("seq", 0)
 
     today = operation_date if operation_date not in ("auto", "", None) else __import__("datetime").datetime.now().strftime("%d.%m.%Y")
+
+    # Normalize single-digit hour: "1:13:23" → "01:13:23"
+    if operation_time and operation_time not in ("auto", "", None):
+        _tp = operation_time.split(":")
+        if len(_tp) >= 2:
+            try:
+                operation_time = f"{int(_tp[0]):02d}:{_tp[1]}" + (f":{_tp[2]}" if len(_tp) >= 3 else ":00")
+            except (ValueError, IndexError):
+                pass
 
     if last_date != today or last_seq <= 0:
         seeded = _generate_operation_id(today, operation_time)
@@ -3969,8 +3996,7 @@ def _gen_tbank_sbp(fields: dict) -> tuple[bytes, str]:
     from gen_tbank_receipt import generate_tbank_receipt
     try:
         from tbank_enrich_donor import enrich_all, TBANK_DIR as _TBANK_DIR
-        if not list(_TBANK_DIR.glob("*_enriched.pdf")):
-            enrich_all(_TBANK_DIR)
+        enrich_all(_TBANK_DIR)  # safe every call — skips already-enriched files
     except Exception:
         pass
 
@@ -4107,25 +4133,10 @@ def _run_new_gen(token: str, uid: int, chat_id: int, state: dict, tg_req) -> Non
 
         if mode == "tbank_sbp":
             pdf_bytes, filename = _gen_tbank_sbp(fields)
-            # Сохраняем PDF и показываем те же три кнопки что у Альфы
-            USER_STATE[uid] = {
-                "awaiting": "new_gen_pending",
-                "new_gen_mode": mode,
-                "new_gen_values": fields,
-                "new_gen_saved_fields": fields,
-                "new_gen_saved_mode": mode,
-                "new_gen_pdf_bytes": pdf_bytes,
-                "new_gen_pdf_filename": filename,
-            }
-            tg_req(token, "sendMessage", {
-                "chat_id": chat_id,
-                "text": f"✅ Чек {label} готов!\n\nВыберите действие:",
-                "reply_markup": json.dumps({"inline_keyboard": [
-                    [{"text": "📎 Прислать чек для нового SBP ID", "callback_data": "new_gen_sbp_extract"}],
-                    [{"text": "💾 Сохранить PDF", "callback_data": "new_gen_save_pdf"}],
-                    [{"text": "❌ Отмена", "callback_data": "main_back"}],
-                ]}),
-            })
+            del USER_STATE[uid]
+            caption = f"✅ Т-Банк СБП | {fields.get('amount', '?')} руб."
+            tg_req(token, "sendDocument", {"chat_id": chat_id, "caption": caption}, files={"document": (filename, pdf_bytes)})
+            _send_main_menu_button(token, chat_id, tg_req)
             return
 
         # Для Альфа: сначала проверяем SBP ID из формы, затем пул
@@ -4370,11 +4381,11 @@ def _handle_check_command(token: str, chat_id: int, text: str, tg_req) -> None:
 
         elif mode in ("tbank_sbp", "tbank"):
             from gen_tbank_receipt import generate_tbank_receipt, get_missing_chars, _find_donor
-            # Ensure enriched donors exist; create them if needed
+            # Always run enrich_all — it skips already-enriched files, but will
+            # create enriched versions of any new fresh donors added to TBANK/.
             try:
                 from tbank_enrich_donor import enrich_all, TBANK_DIR as _TBANK_DIR
-                if not list(_TBANK_DIR.glob("*_enriched.pdf")):
-                    enrich_all(_TBANK_DIR)
+                enrich_all(_TBANK_DIR)
             except Exception:
                 pass
             amount_raw = fields.get("amount", "1000")
@@ -4629,7 +4640,7 @@ def _handle_vtb_transgran_input(token: str, uid: int, chat_id: int, text: str, m
 
 
 def run_bot(token: str) -> None:
-    offset = 0
+    offset = _load_offset()
     print("Бот запущен (без зависимостей)...")
 
     _ALLOWED_UPDATES = ["message", "callback_query"]
@@ -4675,6 +4686,7 @@ def run_bot(token: str) -> None:
 
         for upd in r.get("result", []):
             offset = upd["update_id"] + 1
+            _save_offset(offset)
             try:
 
                 if "message" in upd:
