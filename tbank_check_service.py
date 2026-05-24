@@ -795,6 +795,31 @@ def donor_keywords_ok(pdf_path: str | Path) -> bool:
     return False
 
 
+def _update_keywords_ts_only(pdf_bytes: bytes, dt: Optional[datetime] = None) -> bytes:
+    """Update ONLY the timestamp in /Keywords, keeping hash and suffix unchanged.
+
+    The external integrity verifier checks that the Keywords timestamp matches
+    the operation date shown in the receipt content. We must sync this even in
+    preserve_integrity mode; everything else (hash, suffix, /ID, CreationDate)
+    stays untouched so the file structure is preserved byte-for-byte.
+    """
+    dt = dt or datetime.now()
+    data = bytearray(pdf_bytes)
+    kw_m = re.search(rb"/Keywords\(([^)]+)\)", bytes(data))
+    if not kw_m:
+        return bytes(data)
+    old_kw_bytes = kw_m.group(1)
+    old_kw = old_kw_bytes.decode("latin-1")
+    parts = old_kw.split(" | ")
+    if len(parts) >= 3:
+        ts = dt.strftime("%d.%m.%Y %H:%M:%S")
+        new_kw = f"{ts} | {parts[1]} | {parts[2]}"
+        new_kw_bytes = new_kw.encode("latin-1")
+        padded = new_kw_bytes[: len(old_kw_bytes)].ljust(len(old_kw_bytes))
+        data[kw_m.start(1) : kw_m.end(1)] = padded
+    return bytes(data)
+
+
 def _update_keywords(pdf_bytes: bytes, dt: Optional[datetime] = None) -> bytes:
     """Update /Keywords with new timestamp and hash, preserving byte length."""
     dt = dt or datetime.now()

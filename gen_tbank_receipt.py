@@ -379,6 +379,7 @@ def generate_tbank_receipt(
         _update_doc_id,
         _update_dates,
         _update_keywords,
+        _update_keywords_ts_only,
     )
 
     operation_date, operation_time = _auto_datetime(operation_date, operation_time)
@@ -421,13 +422,19 @@ def generate_tbank_receipt(
 
     pdf_bytes = patch_all_fields(donor_path, changes, receipt_type)
 
-    if not preserve_integrity:
-        try:
-            dt = datetime.strptime(
-                f"{operation_date} {operation_time}", "%d.%m.%Y %H:%M:%S"
-            )
-        except ValueError:
-            dt = datetime.now()
+    try:
+        dt = datetime.strptime(
+            f"{operation_date} {operation_time}", "%d.%m.%Y %H:%M:%S"
+        )
+    except ValueError:
+        dt = datetime.now()
+
+    if preserve_integrity:
+        # Sync only the timestamp in /Keywords so it matches the content date.
+        # Hash and suffix are kept from the donor — the file structure (size,
+        # offsets, /ID, CreationDate) stays byte-identical to the original.
+        pdf_bytes = _update_keywords_ts_only(pdf_bytes, dt)
+    else:
         pdf_bytes = _update_keywords(pdf_bytes, dt)
         pdf_bytes = _update_dates(pdf_bytes, dt)
         pdf_bytes = _update_doc_id(pdf_bytes)
