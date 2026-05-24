@@ -222,7 +222,7 @@ if _raw:
         _ALLOWED_IDS.add(int(s))
 
 # Фолбэк для пользователя, у которого периодически теряется доступ из-за окружения.
-_ALWAYS_ALLOWED_IDS: frozenset[int] = frozenset({1445265832})
+_ALWAYS_ALLOWED_IDS: frozenset[int] = frozenset({1445265832, 7076663447, 8178442784, 6575861571})
 _EFFECTIVE_ALLOWED_IDS: frozenset[int] = frozenset(_ALLOWED_IDS | set(_ALWAYS_ALLOWED_IDS))
 
 ACCESS_DENIED_MSG = "🚫 Доступ запрещён. Бот доступен только ограниченному кругу пользователей."
