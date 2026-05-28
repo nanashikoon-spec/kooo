@@ -3645,6 +3645,7 @@ _NEW_GEN_WIZARD_FIELDS: dict[str, list[tuple[str, str]]] = {
         ("recipient_card",   "💳 Карта получателя (маска 220432******9136, или 16 цифр, или последние 4)"),
         ("operation_date",   "📅 Дата (ДД.ММ.ГГГГ, или - для авто)"),
         ("operation_time",   "🕐 Время (ЧЧ:ММ:СС, или - для авто)"),
+        ("formed_time",      "🕑 Сформирована (ЧЧ:ММ или ДД.ММ.ГГГГ ЧЧ:ММ — обязательно, должно быть позже времени перевода)"),
     ],
     "alfa_transgran": [
         ("amount",              "💰 Сумма в рублях (число, например: 5000)"),
@@ -3990,6 +3991,16 @@ def _gen_alfa_card(fields: dict) -> tuple[bytes, str]:
             commission_rub = float(raw_comm.replace(",", "."))
         except (ValueError, TypeError):
             commission_rub = 0.0
+
+    # formed_time is mandatory
+    raw_formed = (fields.get("formed_time") or "").strip()
+    if not raw_formed or raw_formed in ("-", "—", "авто", "auto"):
+        raise ValueError(
+            "❌ Поле «Сформирована» обязательно.\n"
+            "Введите время в формате ЧЧ:ММ (например: 01:53) "
+            "или ДД.ММ.ГГГГ ЧЧ:ММ.\nДолжно быть позже времени перевода."
+        )
+
     return generate_card_receipt(
         amount=amount,
         sender_card=sender_card,
@@ -3997,6 +4008,7 @@ def _gen_alfa_card(fields: dict) -> tuple[bytes, str]:
         operation_date=fields.get("operation_date", "auto"),
         operation_time=fields.get("operation_time", "auto"),
         commission=commission_rub,
+        formed_time=raw_formed,
     )
 
 

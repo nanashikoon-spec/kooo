@@ -403,6 +403,7 @@ def generate_card_receipt(
     operation_date: str = "auto",
     operation_time: str = "auto",
     commission: "int | float" = 0,
+    formed_time: "str | None" = None,
     donor_path: "str | Path | None" = None,
     output_path: "str | Path | None" = None,
 ) -> tuple[bytes, str]:
@@ -461,7 +462,18 @@ def generate_card_receipt(
     new_sender_card = _fmt_card_mask(sender_card)
     new_recipient_card = _fmt_card_mask(recipient_card)
     new_date_time = _fmt_datetime_card(operation_date, operation_time)
-    new_date_formed = _fmt_formed_card(operation_date, operation_time)
+    if formed_time and formed_time not in ("auto", "авто", "-", ""):
+        _ft = formed_time.strip()
+        if re.match(r"^\d{1,2}:\d{2}$", _ft):
+            _ft_date = operation_date
+            _hh, _mi = _ft.split(":")
+            _ft = f"{_ft_date}\xa0{int(_hh):02d}:{_mi}\xa0мск"
+        elif re.match(r"^\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}$", _ft):
+            _parts = _ft.split()
+            _ft = f"{_parts[0]}\xa0{_parts[1]}\xa0мск"
+        new_date_formed = _ft
+    else:
+        new_date_formed = _fmt_formed_card(operation_date, operation_time)
     new_auth_code = _generate_auth_code()
     new_operation_id = _generate_operation_id_card(operation_date, operation_time)
 
@@ -599,11 +611,23 @@ def generate_card_receipt(
     # filename_ts must satisfy: formed_ts - filename_ts in [180, 360]
     # => filename_ts = formed_ts - offset  where offset in [225, 295]
     try:
-        dd, mm, yyyy = (int(x) for x in operation_date.split("."))
-        hh, mi, ss = int(operation_time[:2]), int(operation_time[3:5]), int(operation_time[6:8])
-        op_utc = datetime(yyyy, mm, dd, hh, mi, ss, tzinfo=timezone.utc) - _MSK
-        # formed_ts = operation time with seconds zeroed out
-        formed_utc = datetime(yyyy, mm, dd, hh, mi, 0, tzinfo=timezone.utc) - _MSK
+        if formed_time and formed_time not in ("auto", "авто", "-", ""):
+            # Parse explicit formed_time for filename timestamp
+            _ft2 = formed_time.strip()
+            if re.match(r"^\d{1,2}:\d{2}$", _ft2):
+                _ft2 = f"{operation_date} {_ft2}"
+            _fm = re.match(r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})", _ft2)
+            if _fm:
+                _dd2, _mm2, _yyyy2, _hh2, _mi2 = (int(x) for x in _fm.groups())
+                formed_utc = datetime(_yyyy2, _mm2, _dd2, _hh2, _mi2, 0, tzinfo=timezone.utc) - _MSK
+            else:
+                dd, mm, yyyy = (int(x) for x in operation_date.split("."))
+                hh, mi = int(operation_time[:2]), int(operation_time[3:5])
+                formed_utc = datetime(yyyy, mm, dd, hh, mi, 0, tzinfo=timezone.utc) - _MSK
+        else:
+            dd, mm, yyyy = (int(x) for x in operation_date.split("."))
+            hh, mi = int(operation_time[:2]), int(operation_time[3:5])
+            formed_utc = datetime(yyyy, mm, dd, hh, mi, 0, tzinfo=timezone.utc) - _MSK
         offset_sec = random.randint(225, 295)
         ts_ms = int((formed_utc.timestamp() - offset_sec) * 1000) + random.randint(0, 999)
     except Exception:
