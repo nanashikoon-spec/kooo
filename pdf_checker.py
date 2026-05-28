@@ -34,6 +34,7 @@ TJ_COUNT_BY_TYPE: dict[str, int] = {
     "transgran": 35,  # 5L + 4R
     "alfa":      32,  # 4L + 4R
     "card":      32,  # 4L + 4R
+    "alfa_card": 32,  # 4L + 4R
     "mobile":    32,  # 4L + 4R
 }
 ZLIB_LEVEL6_HEADER = bytes([0x78, 0x9C])

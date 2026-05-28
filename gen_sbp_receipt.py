@@ -779,6 +779,7 @@ def generate_sbp_receipt(
     sbp_p23: str | None = None,
     sbp_check: str | None = None,
     sbp_id_override: str | None = None,
+    formed_time: str | None = None,
 ) -> tuple[bytes, str]:
     """Generate an Alfa-Bank SBP receipt PDF.
 
@@ -865,8 +866,21 @@ def generate_sbp_receipt(
     # Real Alfa SBP receipts: "Сформирована" is within 0-12 minutes of the transfer.
     # Checker flags PDFs where gap > ~15 min even on genuine receipts.
     # Observed safe range from passing real PDFs: 0-12 min.
-    formed_offset = random.randint(0, 12)
-    new_date_formed = _fmt_formed(operation_date, operation_time, offset_minutes=formed_offset)
+    if formed_time and formed_time not in ("auto", "авто", "-", ""):
+        # Use explicitly provided formed time (DD.MM.YYYY HH:MM or just HH:MM)
+        _ft = formed_time.strip()
+        # If only time HH:MM provided, combine with operation_date
+        if re.match(r"^\d{1,2}:\d{2}$", _ft):
+            _ft = f"{operation_date}\xa0{int(_ft[:2]):02d}:{_ft[-2:]}\xa0мск"
+        elif re.match(r"^\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}$", _ft):
+            _parts = _ft.split()
+            _ft = f"{_parts[0]}\xa0{_parts[1]}\xa0мск"
+        new_date_formed = _ft
+        formed_offset = 0  # used only for _compute_filename_ts fallback
+    else:
+        formed_offset = 2
+    if not formed_time or formed_time in ("auto", "авто", "-", ""):
+        new_date_formed = _fmt_formed(operation_date, operation_time, offset_minutes=formed_offset)
     new_date_time = _fmt_datetime(operation_date, operation_time)
     new_amount = _fmt_rub(amount)
     new_commission = _fmt_rub(commission)

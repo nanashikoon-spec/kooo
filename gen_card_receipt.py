@@ -100,8 +100,18 @@ def _generate_operation_id_card(date_str: str, time_str: str = "00:00:00") -> st
 
     The 7-digit sequence is a daily counter similar to SBP.
     """
-    parts = date_str.split(".")
-    dd, mm, yy = parts[0], parts[1], parts[2][2:]
+    # Normalize separators and split safely
+    _normalized = re.sub(r"[:/\-]", ".", date_str.strip())
+    parts = _normalized.split(".")
+    if len(parts) < 3:
+        parts = ["01", "01", "2026"]
+    try:
+        dd = f"{int(parts[0]):02d}"
+        mm = f"{int(parts[1]):02d}"
+        yr = parts[2] if parts[2] else "2026"
+        yy = yr[-2:] if len(yr) >= 2 else yr.zfill(2)
+    except (ValueError, IndexError):
+        dd, mm, yy = "01", "01", "26"
 
     try:
         hh, mi = int(time_str[:2]), int(time_str[3:5])
@@ -154,6 +164,124 @@ def _cmap_from_pdf(pdf_bytes: bytes) -> dict[int, str]:
 def _chars_missing(cmap: dict[int, str], text: str) -> set[str]:
     """Return characters in text that are not covered by the CMap."""
     return {ch for ch in text if ch != "\xa0" and ord(ch) not in cmap}
+
+
+def _strip_unused_cmap_entries(pdf_bytes: bytes) -> bytes:
+    """Remove CMap bfchar entries whose CIDs are not referenced in any Tj command.
+
+    Oracle BI Publisher generates a perfectly minimal CMap.  After donor-patching
+    some characters may no longer be used; this function removes them so the CMap
+    stays minimal and the unused-entry checker passes.
+    """
+    # Collect every CID actually referenced in Tj commands
+    used_cids: set[int] = set()
+    stream_starts = [m.end() for m in re.finditer(rb"stream\r\n", pdf_bytes)]
+    for sstart in stream_starts:
+        lm = None
+        for m in re.finditer(rb"/Length\s+(\d+)", pdf_bytes[max(0, sstart - 300):sstart]):
+            lm = m
+        if not lm:
+            continue
+        slen = int(lm.group(1))
+        chunk = pdf_bytes[sstart: sstart + slen]
+        try:
+            dec = zlib.decompress(chunk)
+        except zlib.error:
+            continue
+        if b"Tj" not in dec or b"BT" not in dec:
+            continue
+        for tj in re.finditer(rb"<([0-9A-Fa-f]+)>\s*Tj", dec):
+            hs = tj.group(1).decode()
+            for i in range(0, len(hs), 4):
+                used_cids.add(int(hs[i: i + 4], 16))
+
+    if not used_cids:
+        return pdf_bytes
+
+    # Find and patch the CMap stream (contains beginbfchar)
+    pdf_ba = bytearray(pdf_bytes)
+    for sstart in stream_starts:
+        lm = None
+        for m in re.finditer(rb"/Length\s+(\d+)", pdf_bytes[max(0, sstart - 300):sstart]):
+            lm = m
+        if not lm:
+            continue
+        len_match_abs = sstart - 300 + max(0, sstart - 300 - (sstart - 300)) + lm.start(1)
+        # Locate absolute position of /Length value in the original bytes
+        search_start = max(0, sstart - 300)
+        abs_lm = None
+        for m in re.finditer(rb"/Length\s+(\d+)", pdf_bytes[search_start:sstart]):
+            abs_lm = m
+        if not abs_lm:
+            continue
+        abs_len_pos = search_start + abs_lm.start(1)
+
+        slen = int(abs_lm.group(1))
+        chunk = pdf_bytes[sstart: sstart + slen]
+        try:
+            dec = zlib.decompress(chunk)
+        except zlib.error:
+            continue
+        if b"beginbfchar" not in dec:
+            continue
+
+        # Parse bfchar section
+        bfc_m = re.search(rb"(\d+)\s+beginbfchar(.*?)endbfchar", dec, re.DOTALL)
+        if not bfc_m:
+            continue
+
+        old_count = int(bfc_m.group(1))
+        entries_raw = bfc_m.group(2)
+        # Keep only entries whose CID is in used_cids (plus CID 0 = .notdef)
+        kept = []
+        for em in re.finditer(rb"<([0-9A-Fa-f]{4})>\s*<([0-9A-Fa-f]{4})>", entries_raw):
+            cid = int(em.group(1), 16)
+            if cid == 0 or cid in used_cids:
+                kept.append(em.group(0))
+
+        if len(kept) == old_count:
+            continue  # nothing to strip
+
+        new_entries = b"\r\n" + b"\r\n".join(kept) + b"\r\n"
+        new_section = str(len(kept)).encode() + b" beginbfchar" + new_entries + b"endbfchar"
+        new_dec = dec[: bfc_m.start()] + new_section + dec[bfc_m.end():]
+
+        new_raw = zlib.compress(new_dec, 6)
+        delta = len(new_raw) - slen
+
+        # Patch Length value
+        old_len_str = str(slen).encode()
+        new_len_str = str(len(new_raw)).encode()
+        pdf_ba[abs_len_pos: abs_len_pos + len(old_len_str)] = new_len_str
+        len_delta_chars = len(new_len_str) - len(old_len_str)
+
+        # Replace stream content
+        real_sstart = sstart + len_delta_chars
+        pdf_ba = bytearray(bytes(pdf_ba)[:real_sstart] + new_raw + bytes(pdf_ba)[real_sstart + slen:])
+
+        # Update xref offsets
+        total_delta = delta + len_delta_chars
+        xref_m = re.search(rb"xref\r\n\d+ \d+\r\n((?:\d{10} \d{5} [nf]\s*\r?\n)+)", bytes(pdf_ba))
+        if xref_m and total_delta != 0:
+            entries = bytearray(xref_m.group(1))
+            for em in re.finditer(rb"(\d{10})( \d{5} [nf]\s*\r?\n)", entries):
+                off = int(em.group(1))
+                if off > sstart:
+                    entries[em.start(1): em.start(1) + 10] = f"{off + total_delta:010d}".encode()
+            pdf_ba[xref_m.start(1): xref_m.end(1)] = bytes(entries)
+
+        # Update startxref
+        sxref_m = re.search(rb"startxref\r\n(\d+)\r\n", bytes(pdf_ba))
+        if sxref_m and total_delta != 0:
+            old_sxref = int(sxref_m.group(1))
+            if old_sxref > sstart:
+                new_sxref = str(old_sxref + total_delta).encode()
+                pdf_ba[sxref_m.start(1): sxref_m.end(1)] = new_sxref
+
+        print(f"[CARD] CMap stripped: {old_count} -> {len(kept)} entries")
+        return bytes(pdf_ba)
+
+    return pdf_bytes
 
 
 def _set_doc_id_equal(pdf_bytes: bytes) -> bytes:
@@ -274,7 +402,7 @@ def generate_card_receipt(
     recipient_card: str = "1234",
     operation_date: str = "auto",
     operation_time: str = "auto",
-    commission: int = 0,
+    commission: "int | float" = 0,
     donor_path: "str | Path | None" = None,
     output_path: "str | Path | None" = None,
 ) -> tuple[bytes, str]:
@@ -299,13 +427,37 @@ def generate_card_receipt(
     if operation_date in ("auto", "", None):
         now_msk = datetime.now(timezone.utc) + _MSK
         operation_date = now_msk.strftime("%d.%m.%Y")
+    else:
+        # Normalize separators: user may enter "24:05:2026" or "24/05/2026"
+        operation_date = re.sub(r"[:/]", ".", operation_date.strip())
+        # Fix doubled separator e.g. "24.025.2026" → try to parse and reformat
+        _dp = operation_date.split(".")
+        if len(_dp) == 3:
+            try:
+                _dd, _mm, _yyyy = int(_dp[0]), int(_dp[1]), int(_dp[2])
+                if _yyyy < 100:
+                    _yyyy += 2000
+                operation_date = f"{_dd:02d}.{_mm:02d}.{_yyyy:04d}"
+            except (ValueError, IndexError):
+                operation_date = datetime.now(timezone.utc).strftime("%d.%m.%Y")
+        elif len(_dp) < 3:
+            operation_date = (datetime.now(timezone.utc) + _MSK).strftime("%d.%m.%Y")
     if operation_time in ("auto", "", None):
         now_msk = datetime.now(timezone.utc) + _MSK
         operation_time = now_msk.strftime("%H:%M:%S")
+    else:
+        # Normalize time: "22.53.43" → "22:53:43"
+        operation_time = re.sub(r"[./]", ":", operation_time.strip())
+        _tp = operation_time.split(":")
+        if len(_tp) >= 2:
+            try:
+                operation_time = f"{int(_tp[0]):02d}:{int(_tp[1]):02d}:{int(_tp[2]) if len(_tp) > 2 else 0:02d}"
+            except (ValueError, IndexError):
+                pass
 
     # --- Format fields ---
     new_amount = _fmt_rub_card(amount)
-    new_commission = _fmt_commission_card(commission * 100)
+    new_commission = _fmt_commission_card(int(round(commission * 100)))
     new_sender_card = _fmt_card_mask(sender_card)
     new_recipient_card = _fmt_card_mask(recipient_card)
     new_date_time = _fmt_datetime_card(operation_date, operation_time)
@@ -377,7 +529,7 @@ def generate_card_receipt(
 
     print(f"[CARD] Replacements ({len(replacements)}):")
     for old, new in replacements:
-        print(f"  {old!r} → {new!r}")
+        print(f"  {old!r} -> {new!r}")
 
     if replacements:
         from cid_patch_amount import patch_replacements
@@ -407,11 +559,20 @@ def generate_card_receipt(
     pdf_bytes = _set_doc_id_equal(pdf_bytes)
 
     # --- Post-generation validation ---
+    # We check every editable field (not just amount + 2 cards) so the bot
+    # refuses to send a card receipt that doesn't really contain what the
+    # user asked for. Structural errors (xref / length / /ID / producer)
+    # also trigger a hard failure — they always indicate a broken PDF.
     from pdf_validate import validate_pdf
     expected = [
         new_amount.replace("\xa0", " ").strip(),
+        new_commission.replace("\xa0", " ").strip(),
         new_sender_card.replace("\xa0", " ").strip(),
         new_recipient_card.replace("\xa0", " ").strip(),
+        new_date_time.replace("\xa0", " ").strip(),
+        new_date_formed.replace("\xa0", " ").strip(),
+        new_auth_code,
+        new_operation_id,
     ]
     result = validate_pdf(pdf_bytes, expected)
     for line in result.info:
@@ -421,17 +582,32 @@ def generate_card_receipt(
     if result.errors:
         for line in result.errors:
             print(f"[CARD VALIDATE ERROR] {line}")
+        raise RuntimeError(
+            "Generated card PDF is internally inconsistent:\n  - "
+            + "\n  - ".join(result.errors)
+        )
+
+    # --- Strip unused CMap entries ---
+    # Genuine Oracle BI Publisher PDFs have a minimal CMap with exactly the
+    # characters used in content.  After donor-patching some may be unused.
+    pdf_bytes = _strip_unused_cmap_entries(pdf_bytes)
 
     # --- Canonical filename ---
-    # Alfa card filenames: AM_{13-digit-ts}.pdf
-    # Use a timestamp close to operation time
+    # Genuine Alfa-Bank card filenames: AM_{13-digit-ms}.pdf
+    # The epoch is 225-301 seconds BEFORE date_formed (= operation time rounded to minutes).
+    # date_formed strips seconds, so: formed_ts = op_ts - seconds_part
+    # filename_ts must satisfy: formed_ts - filename_ts in [180, 360]
+    # => filename_ts = formed_ts - offset  where offset in [225, 295]
     try:
         dd, mm, yyyy = (int(x) for x in operation_date.split("."))
         hh, mi, ss = int(operation_time[:2]), int(operation_time[3:5]), int(operation_time[6:8])
         op_utc = datetime(yyyy, mm, dd, hh, mi, ss, tzinfo=timezone.utc) - _MSK
-        ts_ms = int(op_utc.timestamp() * 1000) + random.randint(100, 9999)
+        # formed_ts = operation time with seconds zeroed out
+        formed_utc = datetime(yyyy, mm, dd, hh, mi, 0, tzinfo=timezone.utc) - _MSK
+        offset_sec = random.randint(225, 295)
+        ts_ms = int((formed_utc.timestamp() - offset_sec) * 1000) + random.randint(0, 999)
     except Exception:
-        ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 250_000
     canonical_filename = f"AM_{ts_ms}.pdf"
 
     if output_path is not None:

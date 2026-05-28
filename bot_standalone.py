@@ -3635,10 +3635,12 @@ _NEW_GEN_WIZARD_FIELDS: dict[str, list[tuple[str, str]]] = {
         ("account_last4",    "💳 Последние 4 цифры счёта списания (например: 2476, или - для авто)"),
         ("operation_date",   "📅 Дата (ДД.ММ.ГГГГ, или - для авто)"),
         ("operation_time",   "🕐 Время (ЧЧ:ММ:СС, или - для авто)"),
+        ("formed_time",      "🕑 Сформирована (ЧЧ:ММ или ДД.ММ.ГГГГ ЧЧ:ММ, или - для +2 мин авто)"),
         ("sbp_id",           "🔑 SBP ID (32 символа из реального чека, например: A6119154524577180B10030011750703, или - для авто)"),
     ],
     "alfa_card": [
         ("amount",           "💰 Сумма перевода (число, например: 5000)"),
+        ("commission",       "💰 Комиссия (например: 49,33 или 0, или - для 0)"),
         ("sender_card",      "💳 Карта отправителя (маска 220432******9136, или 16 цифр, или последние 4)"),
         ("recipient_card",   "💳 Карта получателя (маска 220432******9136, или 16 цифр, или последние 4)"),
         ("operation_date",   "📅 Дата (ДД.ММ.ГГГГ, или - для авто)"),
@@ -3882,7 +3884,10 @@ def _gen_gpb(fields: dict) -> tuple[bytes, str]:
 
 
 def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[bytes, str]:
-    from gen_sbp_receipt import generate_sbp_receipt, random_account_with_last4
+    import importlib, gen_sbp_receipt as _gsr_mod
+    importlib.reload(_gsr_mod)
+    generate_sbp_receipt = _gsr_mod.generate_sbp_receipt
+    random_account_with_last4 = _gsr_mod.random_account_with_last4
 
     # If the form contains an explicit SBP ID, prefer it over the pool entry.
     form_sbp = (fields.get("sbp_id") or "").strip()
@@ -3913,6 +3918,9 @@ def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[byt
     _tahoma = _bot_dir / "fonts" / "tahoma.ttf"
     _glyph_src = str(_tahoma) if _tahoma.exists() else None
 
+    raw_formed = (fields.get("formed_time") or "").strip()
+    formed_time_val = None if raw_formed in ("-", "—", "авто", "auto", "") else raw_formed
+
     result = generate_sbp_receipt(
         amount=amount,
         recipient=fields.get("recipient_name") or "Виктория Игоревна С",
@@ -3925,6 +3933,7 @@ def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[byt
         receipt_number=receipt_number,
         sbp_id_override=sbp_id_override,
         glyph_source=_glyph_src,
+        formed_time=formed_time_val,
     )
     pdf_bytes, filename = result[0], result[1]
 
@@ -3959,16 +3968,29 @@ def _sanitize_card_input(raw: str, default: str = "9999") -> str:
 
 
 def _gen_alfa_card(fields: dict) -> tuple[bytes, str]:
-    from gen_card_receipt import generate_card_receipt
+    import importlib, sys
+    import gen_card_receipt as _gcr_mod
+    importlib.reload(_gcr_mod)
+    generate_card_receipt = _gcr_mod.generate_card_receipt
     amount = int(re.sub(r"\D", "", fields.get("amount", "1000")) or "1000")
     sender_card = _sanitize_card_input(fields.get("sender_card", "9999"), "9999")
     recipient_card = _sanitize_card_input(fields.get("recipient_card", "1234"), "1234")
+    # Commission: user may enter "49,33" or "49" or "-" for auto (supports kopecks)
+    raw_comm = (fields.get("commission") or "").strip()
+    if raw_comm in ("-", "—", "auto", "авто", ""):
+        commission_rub = 0.0
+    else:
+        try:
+            commission_rub = float(raw_comm.replace(",", "."))
+        except (ValueError, TypeError):
+            commission_rub = 0.0
     return generate_card_receipt(
         amount=amount,
         sender_card=sender_card,
         recipient_card=recipient_card,
         operation_date=fields.get("operation_date", "auto"),
         operation_time=fields.get("operation_time", "auto"),
+        commission=commission_rub,
     )
 
 
@@ -4175,15 +4197,17 @@ def _run_new_gen(token: str, uid: int, chat_id: int, state: dict, tg_req) -> Non
             tg_req(token, "sendMessage", {"chat_id": chat_id, "text": "❌ Неизвестный режим."})
             return
 
-        # Если использован пул — отправляем сразу
-        if used_pool_id:
+        # Если использован пул (alfa_sbp) или это карта/трансгран — отправляем сразу.
+        # Меню «Прислать чек для нового SBP ID» относится только к alfa_sbp без пула,
+        # для карты/трансграна оно бессмысленно (нет SBP ID для подстановки).
+        if used_pool_id or mode in ("alfa_card", "alfa_transgran"):
             del USER_STATE[uid]
             caption = f"✅ {label} | {fields.get('amount', '?')} руб."
             tg_req(token, "sendDocument", {"chat_id": chat_id, "caption": caption}, files={"document": (filename, pdf_bytes)})
             _send_main_menu_button(token, chat_id, tg_req)
             return
 
-        # Иначе сохраняем PDF и предлагаем варианты
+        # Иначе (только alfa_sbp без пула) — сохраняем PDF и предлагаем варианты
         USER_STATE[uid] = {
             "awaiting": "new_gen_pending",
             "new_gen_mode": mode,
@@ -4212,6 +4236,8 @@ def _run_new_gen(token: str, uid: int, chat_id: int, state: dict, tg_req) -> Non
         tg_req(token, "sendMessage", {"chat_id": chat_id, "text": f"❌ Не найдены донорские файлы: {e}"})
         _send_main_menu_button(token, chat_id, tg_req)
     except Exception as e:
+        import traceback as _tb
+        _tb.print_exc()
         if uid in USER_STATE:
             del USER_STATE[uid]
         tg_req(token, "sendMessage", {"chat_id": chat_id, "text": f"❌ Ошибка генерации: {e}"})
@@ -5472,6 +5498,106 @@ def run_bot(token: str) -> None:
                         continue
 
                     # Новый ввод суммы: только новое значение (auto-detect текущего)
+                    if uid in USER_STATE and USER_STATE[uid].get("awaiting") == "alfa_formed_input":
+                        state = USER_STATE[uid]
+                        inp = state.get("file_path", "")
+                        t = text.strip()
+
+                        def send_formed(txt):
+                            tg_request(token, "sendMessage", {"chat_id": chat_id, "text": txt, "parse_mode": "HTML"})
+
+                        # Read current formed string from PDF
+                        _formed_old = None
+                        try:
+                            import fitz as _fitz
+                            _doc = _fitz.open(inp)
+                            _txt_pdf = _doc[0].get_text() if _doc.page_count else ""
+                            _doc.close()
+                            _fm = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})\s+мск", _txt_pdf)
+                            if _fm:
+                                _formed_old = f"{_fm.group(1)} {_fm.group(2)} мск"
+                        except Exception:
+                            pass
+
+                        if not _formed_old:
+                            send_formed("❌ Не удалось прочитать текущее время «Сформирована» из PDF.")
+                            del USER_STATE[uid]
+                            _send_main_menu_button(token, chat_id, tg_request)
+                            continue
+
+                        # Parse new time from user input
+                        _new_formed = None
+                        _t_clean = t.replace(".", ".").strip()
+                        # DD.MM.YYYY HH:MM
+                        _m_full = re.match(r"(\d{2}\.\d{2}\.\d{4})\s+(\d{1,2}:\d{2})$", _t_clean)
+                        # HH:MM only
+                        _m_time = re.match(r"(\d{1,2}:\d{2})$", _t_clean)
+
+                        if _m_full:
+                            _date_part = _m_full.group(1)
+                            _time_part = _m_full.group(2)
+                            _hh, _mm = _time_part.split(":")
+                            _new_formed = f"{_date_part} {int(_hh):02d}:{_mm} мск"
+                        elif _m_time:
+                            _date_part = _formed_old.split()[0]  # keep date from current
+                            _hh, _mm = _m_time.group(1).split(":")
+                            _new_formed = f"{_date_part} {int(_hh):02d}:{_mm} мск"
+                        else:
+                            send_formed("❌ Формат не распознан.\nПримеры: <code>17:48</code> или <code>28.05.2026 17:48</code>")
+                            continue
+
+                        try:
+                            from pathlib import Path as _Path
+                            from cid_patch_amount import patch_replacements as _patch
+                            from gen_sbp_receipt import _trim_cmap_in_pdf as _trim
+                            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                            import random as _rnd, shutil as _sh
+
+                            _src = _Path(inp)
+                            _tmp = _src.with_suffix(".tmp_formed.pdf")
+
+                            ok = _patch(_src, _tmp, [(_formed_old, _new_formed)])
+                            if not ok:
+                                send_formed(f"❌ Не удалось заменить «{_formed_old}» — строка не найдена в PDF.")
+                                _tmp.unlink(missing_ok=True)
+                                continue
+
+                            _data = _trim(_tmp.read_bytes())
+                            _tmp.unlink(missing_ok=True)
+
+                            # Compute new filename from new formed time
+                            _fm2 = re.match(r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})", _new_formed)
+                            if _fm2:
+                                _dd2, _mm2, _yyyy2, _hh2, _mi2 = (int(x) for x in _fm2.groups())
+                                _MSK_OFF = _td(hours=3)
+                                _formed_utc = _dt(_yyyy2, _mm2, _dd2, _hh2, _mi2, 0, tzinfo=_tz.utc) - _MSK_OFF
+                                _offset = _rnd.randint(225, 295)
+                                _ts_ms = int((_formed_utc.timestamp() - _offset) * 1000) + _rnd.randint(0, 999)
+                                _new_fname = f"AM_{_ts_ms}.pdf"
+                            else:
+                                _new_fname = _src.name  # fallback keep original name
+
+                            _dst = _src.parent / _new_fname
+                            _dst.write_bytes(_data)
+                            if _src != _dst:
+                                _src.unlink(missing_ok=True)
+
+                            state["file_path"] = str(_dst)
+                            state["file_name"] = _new_fname
+                            state.pop("awaiting", None)
+
+                            send_formed(f"✅ «Сформирована» изменена:\n<b>{_formed_old}</b> → <b>{_new_formed}</b>")
+                            tg_request(token, "sendDocument", {
+                                "chat_id": chat_id,
+                                "caption": f"📄 {_new_fname}",
+                            }, files={"document": (_new_fname, _data)})
+                            _send_main_menu_button(token, chat_id, tg_request)
+
+                        except Exception as _e:
+                            import traceback as _tb; _tb.print_exc()
+                            send_formed(f"❌ Ошибка: {_e}")
+                        continue
+
                     if uid in USER_STATE and USER_STATE[uid].get("awaiting") == "amount_new_only":
                         state = USER_STATE[uid]
                         nums = re.findall(r"\d+", text.strip())
@@ -6631,6 +6757,7 @@ def run_bot(token: str) -> None:
                                     [{"text": "💰 Только сумма", "callback_data": "bank_alfa_amount"}],
                                     [{"text": "💳 По карте", "callback_data": "bank_alfa_card"}],
                                     [{"text": "📋 Все поля (СБП)", "callback_data": "bank_alfa_full"}],
+                                    [{"text": "🕐 Сформирована", "callback_data": "bank_alfa_formed"}],
                                     [{"text": "🌐 Трансгран", "callback_data": "bank_alfa_transgran"}],
                                     [{"text": "⬅️ Назад", "callback_data": "cancel"}],
                                 ],
@@ -6954,6 +7081,41 @@ def run_bot(token: str) -> None:
                             "text": f"🏦 Альфа — только сумма\n\n{amt_txt}Введите новую сумму:",
                         })
                         continue
+                    if q["data"] == "bank_alfa_formed":
+                        if uid not in USER_STATE:
+                            tg_request(token, "editMessageText", {"chat_id": q["message"]["chat"]["id"], "message_id": q["message"]["message_id"], "text": "❌ Чек не найден. Отправьте PDF заново."})
+                            continue
+                        inp = USER_STATE[uid]["file_path"]
+                        # Read current formed time from PDF
+                        _formed_cur = "?"
+                        try:
+                            import fitz as _fitz
+                            _doc = _fitz.open(inp)
+                            _txt = _doc[0].get_text() if _doc.page_count else ""
+                            _doc.close()
+                            import re as _re
+                            _m = _re.search(r"Сформирована\s*\n?\s*(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}\s+мск)", _txt)
+                            if _m:
+                                _formed_cur = _m.group(1).strip()
+                        except Exception:
+                            pass
+                        USER_STATE[uid]["awaiting"] = "alfa_formed_input"
+                        USER_STATE[uid]["bank"] = "alfa"
+                        tg_request(token, "editMessageText", {
+                            "chat_id": q["message"]["chat"]["id"],
+                            "message_id": q["message"]["message_id"],
+                            "text": (
+                                f"🕐 Изменить «Сформирована»\n\n"
+                                f"Текущее: {_formed_cur}\n\n"
+                                "Введите новое время:\n"
+                                "• <b>ЧЧ:ММ</b> — только время (дата сохранится)\n"
+                                "• <b>ДД.ММ.ГГГГ ЧЧ:ММ</b> — дата и время"
+                            ),
+                            "parse_mode": "HTML",
+                            "reply_markup": json.dumps({"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "bank_alfa_sub"}]]}),
+                        })
+                        continue
+
                     if q["data"] == "bank_alfa_card":
                         if uid not in USER_STATE:
                             tg_request(token, "editMessageText", {"chat_id": q["message"]["chat"]["id"], "message_id": q["message"]["message_id"], "text": "❌ Чек не найден. Отправьте PDF заново."})
