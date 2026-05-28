@@ -3635,7 +3635,7 @@ _NEW_GEN_WIZARD_FIELDS: dict[str, list[tuple[str, str]]] = {
         ("account_last4",    "💳 Последние 4 цифры счёта списания (например: 2476, или - для авто)"),
         ("operation_date",   "📅 Дата (ДД.ММ.ГГГГ, или - для авто)"),
         ("operation_time",   "🕐 Время (ЧЧ:ММ:СС, или - для авто)"),
-        ("formed_time",      "🕑 Сформирована (ЧЧ:ММ или ДД.ММ.ГГГГ ЧЧ:ММ, или - для +2 мин авто)"),
+        ("formed_time",      "🕑 Сформирована (ЧЧ:ММ или ДД.ММ.ГГГГ ЧЧ:ММ — обязательно, например: 14:35 или 29.05.2026 14:35)"),
         ("sbp_id",           "🔑 SBP ID (32 символа из реального чека, например: A6119154524577180B10030011750703, или - для авто)"),
     ],
     "alfa_card": [
@@ -3919,7 +3919,13 @@ def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[byt
     _glyph_src = str(_tahoma) if _tahoma.exists() else None
 
     raw_formed = (fields.get("formed_time") or "").strip()
-    formed_time_val = None if raw_formed in ("-", "—", "авто", "auto", "") else raw_formed
+    if not raw_formed or raw_formed in ("-", "—", "авто", "auto"):
+        raise ValueError(
+            "❌ Поле «Сформирована» обязательно.\n"
+            "Введите время в формате ЧЧ:ММ (например: 14:35) "
+            "или ДД.ММ.ГГГГ ЧЧ:ММ (например: 29.05.2026 14:35)."
+        )
+    formed_time_val = raw_formed
 
     result = generate_sbp_receipt(
         amount=amount,
@@ -4230,6 +4236,9 @@ def _run_new_gen(token: str, uid: int, chat_id: int, state: dict, tg_req) -> Non
             ]}),
         })
 
+    except ValueError as e:
+        # Validation error (e.g. missing formed_time) — keep state so user can retry
+        tg_req(token, "sendMessage", {"chat_id": chat_id, "text": str(e)})
     except FileNotFoundError as e:
         if uid in USER_STATE:
             del USER_STATE[uid]
