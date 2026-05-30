@@ -3920,6 +3920,32 @@ def _gen_alfa_sbp(fields: dict, sbp_id_override: str | None = None) -> tuple[byt
         )
     formed_time_val = raw_formed
 
+    # Validate formed_time >= operation_time + 2 min
+    try:
+        import re as _re
+        from datetime import datetime as _dt, timedelta as _td
+        _ft = raw_formed.strip()
+        if _re.match(r"^\d{1,2}:\d{2}$", _ft):
+            _ft = f"{op_date} {_ft}"
+        _fm = _re.match(r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})", _ft)
+        _op_hh, _op_mi, _op_ss = int(op_time[:2]), int(op_time[3:5]), int(op_time[6:8]) if len(op_time) > 5 else 0
+        _op_date_parts = op_date.split(".")
+        _op_dt = _dt(int(_op_date_parts[2]), int(_op_date_parts[1]), int(_op_date_parts[0]), _op_hh, _op_mi, _op_ss)
+        if _fm:
+            _formed_dt = _dt(int(_fm.group(3)), int(_fm.group(2)), int(_fm.group(1)), int(_fm.group(4)), int(_fm.group(5)))
+            _diff = (_formed_dt - _op_dt).total_seconds()
+            if _diff < 120:
+                raise ValueError(
+                    f"❌ «Сформирована» должна быть минимум на 2 минуты позже времени перевода.\n"
+                    f"Перевод: {op_time[:5]} → Сформирована должна быть не раньше "
+                    f"{(_op_dt + _td(minutes=2)).strftime('%H:%M')}.\n"
+                    f"Введите корректное время."
+                )
+    except ValueError:
+        raise
+    except Exception:
+        pass
+
     result = generate_sbp_receipt(
         amount=amount,
         recipient=fields.get("recipient_name") or "Виктория Игоревна С",
@@ -3992,6 +4018,34 @@ def _gen_alfa_card(fields: dict) -> tuple[bytes, str]:
             "Введите время в формате ЧЧ:ММ (например: 01:53) "
             "или ДД.ММ.ГГГГ ЧЧ:ММ.\nДолжно быть позже времени перевода."
         )
+
+    # Validate formed_time >= operation_time + 2 min
+    try:
+        import re as _re2
+        from datetime import datetime as _dt2, timedelta as _td2
+        _card_op_date = fields.get("operation_date", "auto")
+        _card_op_time = fields.get("operation_time", "auto")
+        if _card_op_date not in ("auto", "", None) and _card_op_time not in ("auto", "", None):
+            _ft2 = raw_formed.strip()
+            if _re2.match(r"^\d{1,2}:\d{2}$", _ft2):
+                _ft2 = f"{_card_op_date} {_ft2}"
+            _fm2 = _re2.match(r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})", _ft2)
+            _odp = _card_op_date.split(".")
+            _ohh, _omi, _oss = int(_card_op_time[:2]), int(_card_op_time[3:5]), int(_card_op_time[6:8]) if len(_card_op_time) > 5 else 0
+            _op_dt2 = _dt2(int(_odp[2]), int(_odp[1]), int(_odp[0]), _ohh, _omi, _oss)
+            if _fm2:
+                _formed_dt2 = _dt2(int(_fm2.group(3)), int(_fm2.group(2)), int(_fm2.group(1)), int(_fm2.group(4)), int(_fm2.group(5)))
+                _diff2 = (_formed_dt2 - _op_dt2).total_seconds()
+                if _diff2 < 120:
+                    raise ValueError(
+                        f"❌ «Сформирована» должна быть минимум на 2 минуты позже времени перевода.\n"
+                        f"Перевод: {_card_op_time[:5]} → введите не раньше "
+                        f"{(_op_dt2 + _td2(minutes=2)).strftime('%H:%M')}."
+                    )
+    except ValueError:
+        raise
+    except Exception:
+        pass
 
     return generate_card_receipt(
         amount=amount,
