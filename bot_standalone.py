@@ -5707,7 +5707,6 @@ def run_bot(token: str) -> None:
                             "reply_markup": json.dumps({
                                 "inline_keyboard": [
                                     [{"text": "🏦 Альфа-Банк", "callback_data": "new_gen_alfa_menu"}],
-                                    [{"text": "🔵 Газпромбанк", "callback_data": "new_gen_gpb_menu"}],
                                     [{"text": "🏛 ВТБ", "callback_data": "gen_bank_menu_vtb"}],
                                     [{"text": "🅃 Т-Банк", "callback_data": "gen_type_tbank"}],
                                     [{"text": "⬅️ Назад", "callback_data": "main_check"}],
