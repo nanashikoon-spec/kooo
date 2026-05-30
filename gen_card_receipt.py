@@ -46,11 +46,13 @@ def _fmt_rub_card(amount: int) -> str:
 
 
 def _fmt_commission_card(amount_kopecks: int) -> str:
-    """'49,20 RUR ' — amount in kopecks for non-zero, or '0 RUR '."""
+    """'49,20 RUR' with kopecks only if non-zero, or '49 RUR' for whole rubles, '0 RUR' for zero."""
     if amount_kopecks == 0:
         return "0\xa0RUR\xa0"
     rubles = amount_kopecks // 100
     kopecks = amount_kopecks % 100
+    if kopecks == 0:
+        return f"{rubles}\xa0RUR\xa0"
     return f"{rubles},{kopecks:02d}\xa0RUR\xa0"
 
 
@@ -527,7 +529,7 @@ def generate_card_receipt(
         new_clean = new_val.replace("\xa0", " ").strip()
         if old and old_clean != new_clean:
             if old.endswith("\xa0"):
-                new_clean += " "
+                new_clean += "\xa0"  # preserve trailing NBSP (genuine Oracle pattern)
             replacements.append((old_clean, new_clean))
 
     _add("amount", new_amount)
