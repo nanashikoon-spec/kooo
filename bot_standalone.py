@@ -494,18 +494,10 @@ def stats_format_today() -> str:
 
 MAIN_MENU_TEXT = (
     "👋 Главная\n\n"
-    "📁 Чек — загрузить PDF или сгенерировать чек из базы.\n"
-    "📋 Создать выписку — редактирование, по чеку или с нуля.\n"
-    "📂 База — просмотр и добавление шаблонов.\n"
-    "📊 Статистика — чеки и выписки за сегодня (/statistika).\n"
-    "📝 Последние изменения — что нового."
+    "📁 Чек — загрузить PDF или сгенерировать чек."
 )
 MAIN_MENU_KB = [
     [{"text": "📁 Чек", "callback_data": "main_check"}],
-    [{"text": "📋 Создать выписку", "callback_data": "main_stmt"}],
-    [{"text": "📂 База", "callback_data": "main_db"}],
-    [{"text": "📊 Статистика", "callback_data": "main_stats"}],
-    [{"text": "📝 Последние изменения", "callback_data": "main_changelog"}],
 ]
 
 CHANGELOG_TEXT = (
