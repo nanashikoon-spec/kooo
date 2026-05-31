@@ -355,6 +355,290 @@ def _update_medium_w_array(pdf_data: bytes) -> bytes:
     return pdf_data
 
 
+def _replace_raw_stream(
+    pdf_data: bytes,
+    stream_start: int,
+    old_stream_len: int,
+    len_num_start: int,
+    new_stream_bytes: bytes,
+) -> bytes:
+    """Replace an uncompressed PDF stream in-place and fix /Length + xref/startxref."""
+    delta = len(new_stream_bytes) - old_stream_len
+
+    data = bytearray(pdf_data)
+
+    # 1. Replace stream bytes
+    data[stream_start : stream_start + old_stream_len] = new_stream_bytes
+
+    # 2. Update /Length number
+    old_len_str = str(old_stream_len).encode()
+    new_len_str = str(len(new_stream_bytes)).encode()
+    len_delta = len(new_len_str) - len(old_len_str)
+    data[len_num_start : len_num_start + len(old_len_str)] = new_len_str
+
+    if len_delta != 0:
+        delta += len_delta
+        stream_start += len_delta
+
+    if delta == 0:
+        return bytes(data)
+
+    # 3. Patch xref table
+    xref_m = re.search(
+        rb"xref\r?\n(\d+)\s+(\d+)\r?\n((?:\d{10}\s+\d{5}\s+[nf]\s*\r?\n)+)",
+        data,
+    )
+    if xref_m:
+        entries = bytearray(xref_m.group(3))
+        for em in re.finditer(rb"(\d{10})(\s+\d{5}\s+[nf]\s*\r?\n)", entries):
+            offset = int(em.group(1))
+            if offset > stream_start:
+                entries[em.start(1) : em.start(1) + 10] = (
+                    f"{offset + delta:010d}".encode()
+                )
+        data[xref_m.start(3) : xref_m.end(3)] = bytes(entries)
+
+    # 4. Patch startxref
+    sxref_m = re.search(rb"startxref\r?\n(\d+)\r?\n", data)
+    if sxref_m:
+        old_sxref = int(sxref_m.group(1))
+        if stream_start < old_sxref:
+            new_sxref = old_sxref + delta
+            pos = sxref_m.start(1)
+            old_s = sxref_m.group(1)
+            data[pos : pos + len(old_s)] = str(new_sxref).encode()
+
+    return bytes(data)
+
+
+def _find_f2_tounicode_obj(pdf_data: bytes) -> int | None:
+    """Return the object number of F2's ToUnicode stream.
+
+    Uses the /Resources → /Font → /F2 chain to get the correct Type0 font
+    object, then follows its /ToUnicode reference.  This avoids false matches
+    on the string "Medium" inside the binary TTF font data.
+    """
+    # Step 1: find the page /Resources dict
+    resources_m = re.search(rb"/Resources\s*<<([^>]*(?:<<[^>]*>>)*[^>]*)>>", pdf_data)
+    if not resources_m:
+        # Try indirect reference: /Resources N 0 R
+        res_ref_m = re.search(rb"/Resources\s+(\d+)\s+0\s+R", pdf_data)
+        if res_ref_m:
+            res_obj_num = int(res_ref_m.group(1))
+            res_obj_m = re.search(
+                rb"(\b" + str(res_obj_num).encode() + rb")\s+0\s+obj\s*\n?<<",
+                pdf_data,
+            )
+            if res_obj_m and int(res_obj_m.group(1)) == res_obj_num:
+                resources_m = re.search(
+                    rb"<<([^>]*)>>",
+                    pdf_data[res_obj_m.end() : res_obj_m.end() + 800],
+                )
+                if resources_m:
+                    resources_m = type(
+                        "M", (), {"group": lambda s, n: resources_m.group(n)}
+                    )()
+    if not resources_m:
+        return None
+
+    # Step 2: find /Font dict inside /Resources
+    # Look for /F2 reference directly in the raw PDF bytes
+    f2_ref_m = re.search(rb"/F2\s+(\d+)\s+0\s+R", pdf_data)
+    if not f2_ref_m:
+        return None
+
+    f2_obj_num = int(f2_ref_m.group(1))
+
+    # Step 3: find the F2 Type0 font object and its /ToUnicode reference
+    pat = re.compile(rb"(\d+)\s+0\s+obj\s*\n?<<")
+    for m in re.finditer(pat, pdf_data):
+        if int(m.group(1)) != f2_obj_num:
+            continue
+        # Read the object header (not the font stream itself)
+        hdr = pdf_data[m.end() : m.end() + 500]
+        tu_m = re.search(rb"/ToUnicode\s+(\d+)\s+0\s+R", hdr)
+        if tu_m:
+            return int(tu_m.group(1))
+        break
+
+    return None
+
+
+def _update_f2_tounicode(pdf_data: bytes) -> bytes:
+    """Add digit CID→Unicode entries to F2 (Medium) ToUnicode CMap.
+
+    T-Bank's F2 font subset only includes ToUnicode entries for digits present
+    in the original document.  After enrichment we inject extra digit glyphs,
+    but without corresponding ToUnicode entries fitz decodes e.g. CID 0x0133
+    as U+0133 ('ĳ') instead of U+0032 ('2').  This function adds a compact
+    bfrange for all 10 digits (CIDs 0x0131–0x013a → U+0030–U+0039) to the F2
+    ToUnicode stream.
+    """
+    tou_obj_num = _find_f2_tounicode_obj(pdf_data)
+    if tou_obj_num is None:
+        return pdf_data  # F2 ToUnicode not found — skip silently
+
+    # Locate the ToUnicode stream object by scanning raw bytes
+    pat = re.compile(rb"(\d+)\s+0\s+obj\s*\n?<<")
+    for sm in re.finditer(pat, pdf_data):
+        if int(sm.group(1)) != tou_obj_num:
+            continue
+        hdr_end = min(sm.end() + 600, len(pdf_data))
+        chunk = pdf_data[sm.end():hdr_end]
+        len_m = re.search(rb"/Length\s+(\d+)", chunk)
+        end_m = re.search(rb">>\s*stream\r?\n", chunk)
+        if not len_m or not end_m:
+            break
+
+        old_len = int(len_m.group(1))
+        len_num_start = sm.end() + len_m.start(1)
+        stream_start = sm.end() + end_m.end()
+        raw_stream = pdf_data[stream_start : stream_start + old_len]
+
+        # Decompress if compressed
+        compressed = b"/Filter" in chunk[:500]
+        try:
+            old_stream = zlib.decompress(raw_stream) if compressed else raw_stream
+        except Exception:
+            old_stream = raw_stream
+            compressed = False
+
+        # Skip if digit range already present
+        if b"<013a>" in old_stream or (b"<0131><013a>" in old_stream):
+            return pdf_data
+        # Check if all 10 digits already explicitly listed
+        digit_cids_present = sum(
+            1 for cid in range(0x0131, 0x013B)
+            if f"<{cid:04x}>".encode() in old_stream
+        )
+        if digit_cids_present >= 10:
+            return pdf_data
+
+        # Build new bfrange block for digits 0–9
+        digit_range = b"\n1 beginbfrange\n<0131><013a><0030>\nendbfrange\n"
+
+        # Insert before "endcmap"
+        endcmap_pos = old_stream.rfind(b"endcmap")
+        if endcmap_pos == -1:
+            break
+        insert_at = endcmap_pos
+        while insert_at > 0 and old_stream[insert_at - 1:insert_at] in (b"\n", b"\r"):
+            insert_at -= 1
+
+        new_stream = old_stream[:insert_at] + digit_range + old_stream[insert_at:]
+
+        # Do NOT increment any existing beginbfrange count — we are adding a
+        # completely separate bfrange block, not appending to an existing one.
+        # Multiple beginbfrange...endbfrange sections are valid PDF CMap syntax.
+
+        # Re-compress if the original was compressed
+        final_stream = zlib.compress(new_stream, 6) if compressed else new_stream
+
+        # If was not compressed but file has /Filter tag somehow, use plain
+        return _replace_raw_stream(
+            pdf_data, stream_start, old_len, len_num_start, final_stream
+        )
+
+    return pdf_data  # Could not update — return unchanged
+
+
+def _find_f1_tounicode_obj(pdf_data: bytes) -> int | None:
+    """Return the object number of F1's ToUnicode stream (via /F1 font reference)."""
+    f1_ref_m = re.search(rb"/F1\s+(\d+)\s+0\s+R", pdf_data)
+    if not f1_ref_m:
+        return None
+    f1_obj_num = int(f1_ref_m.group(1))
+    pat = re.compile(rb"(\d+)\s+0\s+obj\s*\n?<<")
+    for m in re.finditer(pat, pdf_data):
+        if int(m.group(1)) != f1_obj_num:
+            continue
+        hdr = pdf_data[m.end() : m.end() + 500]
+        tu_m = re.search(rb"/ToUnicode\s+(\d+)\s+0\s+R", hdr)
+        if tu_m:
+            return int(tu_m.group(1))
+        break
+    return None
+
+
+def _update_f1_tounicode(pdf_data: bytes) -> bytes:
+    """Add ALL Cyrillic CID→Unicode entries to F1 (Regular) ToUnicode CMap.
+
+    T-Bank F1 font subsets only contain ToUnicode entries for characters present
+    in the original document.  When we patch in bank names or sender names
+    containing characters not in the original (e.g. 'б' for 'Сбербанк' when the
+    donor had 'ВТБ'), fitz decodes those CIDs to wrong Unicode values.  This
+    function adds bfchar entries for every Cyrillic CID in REGULAR_CID_TO_UNI
+    that is missing from the existing ToUnicode CMap.
+    """
+    from tbank_cmap import REGULAR_CID_TO_UNI
+
+    tou_obj_num = _find_f1_tounicode_obj(pdf_data)
+    if tou_obj_num is None:
+        return pdf_data
+
+    pat = re.compile(rb"(\d+)\s+0\s+obj\s*\n?<<")
+    for sm in re.finditer(pat, pdf_data):
+        if int(sm.group(1)) != tou_obj_num:
+            continue
+        hdr_end = min(sm.end() + 600, len(pdf_data))
+        chunk = pdf_data[sm.end():hdr_end]
+        len_m = re.search(rb"/Length\s+(\d+)", chunk)
+        end_m = re.search(rb">>\s*stream\r?\n", chunk)
+        if not len_m or not end_m:
+            break
+
+        old_len = int(len_m.group(1))
+        len_num_start = sm.end() + len_m.start(1)
+        stream_start = sm.end() + end_m.end()
+        raw_stream = pdf_data[stream_start : stream_start + old_len]
+
+        compressed = b"/Filter" in chunk[:500]
+        try:
+            old_stream = zlib.decompress(raw_stream) if compressed else raw_stream
+        except Exception:
+            old_stream = raw_stream
+            compressed = False
+
+        # Build bfchar entries for all Cyrillic CIDs not yet in the stream
+        new_entries: list[bytes] = []
+        for cid, uni in sorted(REGULAR_CID_TO_UNI.items()):
+            # Only add Cyrillic (and Cyrillic-adjacent) characters
+            if not (0x0400 <= uni <= 0x045F):
+                continue
+            cid_hex = f"<{cid:04x}>".encode()
+            if cid_hex in old_stream:
+                continue  # already mapped
+            new_entries.append(f"<{cid:04x}> <{uni:04x}>".encode())
+
+        if not new_entries:
+            return pdf_data  # nothing to add
+
+        n = len(new_entries)
+        new_block = (
+            f"\n{n} beginbfchar\n".encode()
+            + b"\n".join(new_entries)
+            + b"\nendbfchar\n"
+        )
+
+        # Insert before "endcmap"
+        endcmap_pos = old_stream.rfind(b"endcmap")
+        if endcmap_pos == -1:
+            break
+        insert_at = endcmap_pos
+        while insert_at > 0 and old_stream[insert_at - 1:insert_at] in (b"\n", b"\r"):
+            insert_at -= 1
+
+        new_stream = old_stream[:insert_at] + new_block + old_stream[insert_at:]
+
+        final_stream = zlib.compress(new_stream, 6) if compressed else new_stream
+        print(f"  F1 ToUnicode: added {n} Cyrillic bfchar entries")
+        return _replace_raw_stream(
+            pdf_data, stream_start, old_len, len_num_start, final_stream
+        )
+
+    return pdf_data
+
+
 def enrich_pdf(input_path: Path, output_path: Path) -> bool:
     """Enrich a T-Bank donor PDF by injecting digit glyphs into F2 font.
 
@@ -418,6 +702,17 @@ def enrich_pdf(input_path: Path, output_path: Path) -> bool:
 
     # Update F2 /W array in CIDFont dict to include all digit widths
     pdf_data = _update_medium_w_array(pdf_data)
+
+    # Update F2 ToUnicode CMap to include digit CIDs → Unicode mappings.
+    # Without this, fitz (and PDF text extractors) cannot decode the new
+    # digit glyphs we injected, producing garbage like U+0133 ('ĳ') for '2'.
+    pdf_data = _update_f2_tounicode(pdf_data)
+
+    # Update F1 ToUnicode CMap to include ALL Cyrillic characters.
+    # The F1 subset only contains characters from the original receipt.  When
+    # we patch in a bank name like 'Сбербанк' into a donor that originally had
+    # 'ВТБ', the 'б' CID has no ToUnicode entry → fitz decodes it as garbage.
+    pdf_data = _update_f1_tounicode(pdf_data)
 
     output_path.write_bytes(pdf_data)
     print(f"  Saved enriched PDF: {output_path}")

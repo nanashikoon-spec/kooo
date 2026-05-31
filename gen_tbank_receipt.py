@@ -79,9 +79,6 @@ def _all_donors(*, integrity_only: bool = False) -> list[Path]:
             continue
         base.append(p)
 
-    if integrity_only:
-        return base
-
     allowed_stems = {p.stem for p in base}
     enriched = [
         p
@@ -103,7 +100,7 @@ def _all_donors(*, integrity_only: bool = False) -> list[Path]:
 
 def _resolve_donor_path(donor_path: Path, *, preserve_integrity: bool = False) -> Path:
     """Prefer enriched donor variant so F2 digits render in amount_bold."""
-    if preserve_integrity or "_enriched" in donor_path.stem:
+    if "_enriched" in donor_path.stem:
         return donor_path
 
     enriched_path = donor_path.with_stem(donor_path.stem + "_enriched")
@@ -130,23 +127,41 @@ def _verified_donors(candidates: list[Path]) -> list[Path]:
 
 
 def _donor_priority(d: Path) -> tuple[int, str]:
-    """Lower tuple sorts earlier: verified UUID donors win over md5/991."""
+    """Lower tuple sorts earlier.
+
+    Priority tiers (ascending = lower priority number = better):
+      0 – verified non-enriched donors (font unchanged = cleanest)
+           UUID+10817/9686 come before md5+991 within this tier
+      1 – verified enriched donors (font has injected digit glyphs)
+      2 – unverified non-enriched
+      3 – unverified enriched / unknown
+    """
     from tbank_check_service import _parse_keywords
 
-    score = 3
+    is_verified = d.name.startswith("tbank_sbp_verified_")
+    is_enriched = "_enriched" in d.stem
+
+    if is_enriched:
+        base = 1 if is_verified else 3
+    else:
+        base = 0 if is_verified else 2
+
+    # Within tier 0 prefer UUID over md5, and newer date over older
+    sub = 0
     try:
         parsed = _parse_keywords(d.read_bytes())
         if parsed:
             _, hash_part, suffix = parsed
             if "-" in hash_part and suffix in ("10817", "9686"):
-                score = 0
-            elif "-" not in hash_part and suffix == "991":
-                score = 1
+                sub = 0  # UUID best
+            else:
+                sub = 1  # md5 second
     except Exception:
-        pass
-    if d.name.startswith("tbank_sbp_verified_"):
-        score = min(score, 0)
-    return score, d.name
+        sub = 9
+
+    # Sort newest-first within same (base, sub): negate name (~ sorts Z before A)
+    name_key = ("~" + d.stem) if is_verified else d.name
+    return base, sub, name_key
 
 
 def _probe_padding(donor_path: Path, changes: dict[str, str]) -> int:
@@ -227,11 +242,16 @@ def _find_donor(
         if full_donors:
             all_donors = full_donors
 
+    # Characters that are NOT required to have glyphs in the F1 font.
+    # '*' appears only in masked account numbers ("****1234") and is
+    # ornamental — a missing glyph shows a blank box, which is acceptable.
+    _F1_SKIP_CHARS = frozenset("* ")
+
     needed: set[int] = set()
     if text_fields:
         for val in text_fields.values():
             for ch in str(val):
-                if ch != " ":
+                if ch not in _F1_SKIP_CHARS:
                     needed.add(ord(ch))
 
     if not needed:
@@ -276,8 +296,6 @@ def _find_donor(
         f2_chars = _renderable_f2_chars_for(d)
         if f2_chars is not None and needed_digits and not needed_digits.issubset(f2_chars):
             # F2 lacks some needed digits → swap to enriched donor.
-            # Even in preserve_integrity mode we MUST enrich, otherwise digits
-            # render as invisible gaps (e.g. "11 300" → "11   00").
             if "_enriched" not in d.stem:
                 enriched_candidate = d.with_stem(d.stem + "_enriched")
                 if enriched_candidate.exists() or enriched_candidate in all_donors_set:
@@ -295,6 +313,37 @@ def _find_donor(
                         continue
             else:
                 continue
+
+        # Sanity-check: if fitz decodes any span into Latin Extended chars
+        # (U+0100-U+03FF: Latin Extended-A/B, Greek, Combining Diacritics),
+        # the font has wrong ToUnicode mappings that will produce garbage text.
+        # We only block that specific problematic range; everything else is OK
+        # (ASCII, Cyrillic, symbols like ©, №, «», —, etc. are all allowed).
+        try:
+            import fitz as _fitz
+            _doc = _fitz.open(d)
+            _ok = True
+            for _blk in _doc[0].get_text("dict").get("blocks", []):
+                for _ln in _blk.get("lines", []):
+                    for _sp in _ln.get("spans", []):
+                        for _ch in _sp.get("text", ""):
+                            cp = ord(_ch)
+                            # Block only Latin Extended / Greek / Combining ranges
+                            # which indicate corrupted Cyrillic font mappings
+                            if 0x0100 <= cp <= 0x03FF:
+                                _ok = False
+                                break
+                        if not _ok:
+                            break
+                    if not _ok:
+                        break
+                if not _ok:
+                    break
+            _doc.close()
+            if not _ok:
+                continue  # skip this donor — bad font mappings
+        except Exception:
+            pass
 
         if "_enriched" in d.stem:
             eligible_enriched.append(d)
