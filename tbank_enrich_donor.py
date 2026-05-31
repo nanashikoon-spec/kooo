@@ -388,7 +388,7 @@ def enrich_pdf(input_path: Path, output_path: Path) -> bool:
     # actual outlines are zero-area placeholders that render as invisible.
     # Checking emptiness alone is not reliable; always copying ensures F2
     # gets proper renderable digit outlines from F1.
-    print(f"[INFO] {input_path.name}: Force-copying all digit GIDs from F1 → F2")
+    print(f"[INFO] {input_path.name}: Force-copying all digit GIDs from F1 to F2")
 
     copied = []
     for gid in DIGIT_GIDS:
@@ -411,7 +411,7 @@ def enrich_pdf(input_path: Path, output_path: Path) -> bool:
     f2_font.close()
 
     digits_str = "".join(chr(0x30 + (gid - 305)) for gid in copied)
-    print(f"  Injected digits: {digits_str}  ({len(f2_bytes)} → {len(new_f2_bytes)} bytes)")
+    print(f"  Injected digits: {digits_str}  ({len(f2_bytes)} -> {len(new_f2_bytes)} bytes)")
 
     # Patch F2 font stream in PDF
     pdf_data = _patch_font_stream(pdf_data, f2_start, f2_len, f2_len_pos, new_f2_bytes)
